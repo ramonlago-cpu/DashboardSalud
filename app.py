@@ -13,8 +13,8 @@ st.set_page_config(page_title="Mi Dashboard de Salud V2.0", layout="wide")
 # ==========================================
 DROPBOX_TOKEN = st.secrets["DROPBOX_TOKEN"]
 
-CARPETA_DROPBOX_CSV = "/Tus/Rutas/CSV" 
-CARPETA_DROPBOX_FIT = "/Tus/Rutas/FIT" 
+CARPETA_DROPBOX_CSV = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthExport" 
+CARPETA_DROPBOX_FIT = "/Aplicaciones/HealthFitExporter" 
 
 DIR_LOCAL_CSV = "datos_locales/csv"
 DIR_LOCAL_FIT = "datos_locales/fit"
