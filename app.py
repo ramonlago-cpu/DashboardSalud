@@ -11,7 +11,6 @@ st.set_page_config(page_title="Mi Dashboard de Salud V3.0", layout="wide")
 # ==========================================
 # CONFIGURACIÓN DE DROPBOX Y RUTAS LOCALES
 # ==========================================
-DROPBOX_TOKEN = st.secrets["DROPBOX_TOKEN"]
 
 CARPETA_DROPBOX_CSV = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthExport" 
 CARPETA_DROPBOX_FIT = "/Aplicaciones/HealthFitExporter" 
@@ -24,7 +23,11 @@ os.makedirs(DIR_LOCAL_FIT, exist_ok=True)
 
 @st.cache_resource
 def iniciar_dropbox():
-    return dropbox.Dropbox(DROPBOX_TOKEN)
+    return dropbox.Dropbox(
+        app_key=st.secrets["DROPBOX_APP_KEY"],
+        app_secret=st.secrets["DROPBOX_APP_SECRET"],
+        oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
+    )
 
 def sincronizar_carpeta(dbx, ruta_dbx, ruta_local, extension):
     ruta_api = "" if ruta_dbx == "/" else ruta_dbx
