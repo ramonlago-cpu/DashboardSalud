@@ -227,7 +227,8 @@ if datos_entrenos:
         st.markdown("### 📈 Evolución del Índice de Eficiencia Aeróbica")
         df_running = df_entrenos[df_entrenos['deporte'] == 'running'].copy()
         if not df_running.empty and 'eficiencia_aerobica' in df_running.columns:
-            fig_ef = px.line(df_running, x='fecha_inicio', y='eficiencia_aerobica', trendline="lowess",
+            # CAMBIO AQUÍ: Usamos px.scatter para que la línea de tendencia (trendline) funcione
+            fig_ef = px.scatter(df_running, x='fecha_inicio', y='eficiencia_aerobica', trendline="lowess",
                              title="Eficiencia en Carrera (Metros por minuto / Latido) - ¡Hacia arriba es mejor!",
                              color_discrete_sequence=['#deff9a'])
             st.plotly_chart(fig_ef, width='stretch')
