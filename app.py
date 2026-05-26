@@ -396,7 +396,7 @@ if st.button("✨ Generar Análisis de mi Estado Actual"):
             
             # Autenticación con la clave de tus secretos
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            modelo = genai.GenerativeModel('gemini-1.5-flash')
+            modelo = genai.GenerativeModel('gemini-2.5-flash')
             
             # Recopilamos las variables calculadas previamente (con valores seguros por si falta algo)
             p_pasos = f"{media_pasos:,.0f}" if 'media_pasos' in locals() else "Sin datos"
