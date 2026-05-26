@@ -4,6 +4,7 @@ import pandas as pd
 import dropbox
 import os
 import glob
+import gc  # <-- AÑADE ESTA LÍNEA (Garbage Collector)
 from procesar_datos import analizar_salud_csv, leer_archivo_fit, extraer_series_temporales_fit
 
 st.set_page_config(page_title="Mi Dashboard de Salud V2.0", layout="wide")
@@ -49,11 +50,23 @@ def cargar_datos_locales():
     rutas_csv = glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv"))
     rutas_fit = glob.glob(os.path.join(DIR_LOCAL_FIT, "*.fit"))
     
+    # --- ESCUDO ANTI-COLAPSO DE MEMORIA ---
+    # 1. Ordenamos los archivos por fecha de modificación (los más nuevos primero)
+    rutas_fit.sort(key=os.path.getmtime, reverse=True)
+    
+    # 2. Limitamos la lectura a los 100 entrenamientos más recientes
+    rutas_fit = rutas_fit[:100] 
+    
     entrenos_data = []
     for ruta in rutas_fit:
         nombre_archivo = os.path.basename(ruta)
         datos = leer_archivo_fit(ruta, nombre_archivo)
-        entrenos_data.append(datos)
+        
+        if datos: # Solo lo añadimos si no devolvió un error
+            entrenos_data.append(datos)
+            
+        # 3. Forzamos a Python a limpiar la RAM tras cada archivo
+        gc.collect()
         
     return rutas_csv, entrenos_data
 
