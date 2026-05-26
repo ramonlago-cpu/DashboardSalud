@@ -386,19 +386,18 @@ else:
 # SECCIÓN 3: ENTRENADOR VIRTUAL IA (GEMINI)
 # ==========================================
 st.divider()
-st.header("🤖 AI Coach: Análisis de Fisiología Deportiva")
-st.markdown("Gemini cruzará tus datos de recuperación, sueño y carga para darte un diagnóstico profesional.")
+st.header("🤖 AI Coach: Análisis Integral")
+st.markdown("Gemini cruzará tus datos y generará dos informes detallados: uno clínico (Salud) y uno deportivo (Rendimiento).")
 
-if st.button("✨ Generar Análisis de mi Estado Actual"):
+if st.button("✨ Generar Análisis Completo de mi Estado"):
     with st.spinner("Analizando biomarcadores y carga de entrenamiento..."):
         try:
-            import google.generativeai as genai
+            from google import genai
             
-            # Autenticación con la clave de tus secretos
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            modelo = genai.GenerativeModel('gemini-2.5-flash')
+            # Inicialización del cliente con tu clave secreta
+            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
             
-            # Recopilamos las variables calculadas previamente (con valores seguros por si falta algo)
+            # Recopilamos las variables calculadas previamente
             p_pasos = f"{media_pasos:,.0f}" if 'media_pasos' in locals() else "Sin datos"
             p_hrv = f"{hrv_medio:.0f} ms" if 'hrv_medio' in locals() else "Sin datos"
             p_sueno = f"{sueno_medio:.1f} h" if 'sueno_medio' in locals() else "Sin datos"
@@ -408,35 +407,40 @@ if st.button("✨ Generar Análisis de mi Estado Actual"):
             p_ctl = f"{ctl_actual:.0f}" if 'ctl_actual' in locals() else "0"
             p_ratio = f"{ratio_carga:.2f}" if 'ratio_carga' in locals() else "0"
 
-            # El Prompt maestro que le da contexto a la IA
+            # El Prompt maestro reestructurado para 2 informes separados
             prompt = f"""
-            Actúa como un fisiólogo deportivo y entrenador personal de élite.
-            Analiza mis métricas de salud y entrenamiento de los últimos 30 días y dame un resumen breve, directo y profesional.
+            Actúa como un médico deportivo y entrenador personal de élite.
+            Analiza mis métricas de los últimos 30 días y redacta DOS informes separados pero que se entiendan entre sí.
 
-            MIS DATOS DE SALUD (Promedios diarios):
-            - Pasos: {p_pasos}
+            DATOS DE SALUD (Promedios diarios):
+            - Pasos diarios: {p_pasos}
             - Variabilidad Cardíaca (HRV): {p_hrv}
-            - Sueño: {p_sueno}
+            - Horas de Sueño: {p_sueno}
             - FC Media: {p_fc}
 
-            MIS DATOS DE ENTRENAMIENTO (Modelo TSB):
+            DATOS DE ENTRENAMIENTO (Modelo TSB):
             - Carga Aguda (Fatiga actual - ATL): {p_atl}
             - Carga Crónica (Fitness asimilado - CTL): {p_ctl}
             - Ratio de Riesgo de Lesión (ATL/CTL): {p_ratio} (Nota: >1.2 es sobrecarga, >1.5 es riesgo alto).
 
-            Por favor, genera tu respuesta estructurada en:
-            1. 🩺 **Diagnóstico General:** Cómo está mi cuerpo asimilando el entrenamiento en base a la fatiga y el descanso.
-            2. ⚠️ **Alertas o Puntos de Mejora:** Relaciona el sueño/HRV con la carga de entrenamiento si ves discrepancias.
-            3. 💡 **Recomendación para hoy:** ¿Apretar, descanso activo, o mantener el volumen?
+            ESTRUCTURA TU RESPUESTA EXACTAMENTE ASÍ:
 
-            Usa un tono motivador pero muy científico, directo y conciso. No inventes datos, cíñete a los que te he proporcionado.
+            ### 🩺 1. Análisis de Salud y Recuperación
+            (Analiza mi volumen de sueño, variabilidad cardíaca y actividad diaria. ¿Estoy descansando lo suficiente? ¿Mi sistema nervioso muestra signos de estrés crónico o estoy recuperando bien?).
+
+            ### 🚴‍♂️ 2. Análisis de Entrenamiento y Rendimiento
+            (Analiza mi carga actual, fitness asimilado y riesgo de lesión. Cruza esta información obligatoriamente con mi estado de recuperación de la sección anterior para decirme exactamente qué enfoque o intensidad de sesión debo hacer hoy).
+            
+            Usa un tono motivador, directo y científico.
             """
             
-            # Llamada a la IA
-            respuesta = modelo.generate_content(prompt)
+            # Llamada al modelo de última generación
+            respuesta = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+            )
             
             st.success("✅ Análisis completado con éxito.")
-            # st.info crea un recuadro con fondo destacado para la respuesta
             st.info(respuesta.text)
             
         except Exception as e:
