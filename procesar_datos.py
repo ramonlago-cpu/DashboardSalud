@@ -3,18 +3,15 @@ from fitparse import FitFile
 import io
 
 # =====================================================================
-# 1. PROCESAR EL CSV DE SALUD (Soporta BytesIO)
+# 1. PROCESAR EL CSV DE SALUD (Con soporte de matriz de correlación)
 # =====================================================================
-def analizar_salud_csv(lista_archivos_memoria):
-    if not lista_archivos_memoria:
+def analizar_salud_csv(lista_archivos_locales):
+    if not lista_archivos_locales:
         return pd.DataFrame()
-        
-    print(f"⏳ Procesando {len(lista_archivos_memoria)} archivos de salud desde RAM...")
     
     lista_dataframes = []
-    for archivo_obj in lista_archivos_memoria:
-        # Pandas es capaz de leer directamente desde el buffer de memoria
-        df_individual = pd.read_csv(archivo_obj)
+    for ruta_csv in lista_archivos_locales:
+        df_individual = pd.read_csv(ruta_csv)
         df_individual['Fecha/Hora'] = pd.to_datetime(df_individual['Fecha/Hora'])
         lista_dataframes.append(df_individual)
     
@@ -63,13 +60,10 @@ def analizar_salud_csv(lista_archivos_memoria):
     return resumen_diario
 
 # =====================================================================
-# 2. DECANTAR LOS ARCHIVOS .FIT EN MEMORIA
+# 2. DECANTAR LOS ARCHIVOS .FIT EN MEMORIA (Con Eficiencia Aeróbica)
 # =====================================================================
-def leer_archivo_fit(fit_obj, nombre_archivo):
-    print(f"⏳ Leyendo entrenamiento: {nombre_archivo}")
-    
-    # FitFile soporta leer desde bytes directamente
-    fitfile = FitFile(fit_obj)
+def leer_archivo_fit(ruta_local, nombre_archivo):
+    fitfile = FitFile(ruta_local)
     datos_entreno = {}
     
     for record in fitfile.get_messages('session'):
@@ -80,24 +74,30 @@ def leer_archivo_fit(fit_obj, nombre_archivo):
         fc_media = valores.get("avg_heart_rate", 0)
         fc_max = valores.get("max_heart_rate", 0)
         desnivel_positivo = valores.get("total_ascent", 0)
+        deporte = valores.get("sport", "Otros")
         
         ritmo_str = "-:--"
+        eficiencia_aerobica = 0
+        
         if distancia_km > 0 and duracion_min > 0:
             ritmo_decimal = duracion_min / distancia_km
             minutos = int(ritmo_decimal)
             segundos = int((ritmo_decimal - minutos) * 60)
             ritmo_str = f"{minutos}:{segundos:02d} min/km"
             
-        carga_entreno = 0
-        if fc_media > 0 and duracion_min > 0:
-            fc_reserva = 185 - 55
-            intensidad = (fc_media - 55) / fc_reserva if fc_reserva > 0 else 0
-            intensidad = max(0, min(intensidad, 1))
-            carga_entreno = round(duracion_min * intensidad * 1.5)
+            # Cálculo de Eficiencia (solo para Carrera/Caminata): Metros por minuto / FC Media
+            if fc_media and fc_media > 0 and deporte in ['running', 'walking']:
+                velocidad_m_min = (distancia_km * 1000) / duracion_min
+                eficiencia_aerobica = round(velocidad_m_min / fc_media, 2)
+            
+        fc_reserva = 185 - 55
+        intensidad = (fc_media - 55) / fc_reserva if fc_media and fc_reserva > 0 else 0
+        intensidad = max(0, min(intensidad, 1))
+        carga_entreno = round(duracion_min * intensidad * 1.5)
 
         datos_entreno = {
             "nombre_archivo": nombre_archivo,
-            "deporte": valores.get("sport", "Otros"),
+            "deporte": deporte,
             "fecha_inicio": valores.get("start_time"),
             "duracion_min": duracion_min,
             "distancia_km": distancia_km,
@@ -106,17 +106,18 @@ def leer_archivo_fit(fit_obj, nombre_archivo):
             "calorias_kcal": valores.get("total_calories", 0),
             "fc_media": fc_media,
             "fc_max": fc_max,
-            "carga_entreno": carga_entreno
+            "carga_entreno": carga_entreno,
+            "eficiencia_aerobica": eficiencia_aerobica
         }
         break 
         
     return datos_entreno
 
 # =====================================================================
-# 3. EXTRAER DATOS DETALLADOS GPS Y HR (.FIT) EN MEMORIA
+# 3. EXTRAER DATOS DETALLADOS GPS, HR Y ZONAS CARDÍACAS
 # =====================================================================
-def extraer_series_temporales_fit(fit_obj):
-    fitfile = FitFile(fit_obj)
+def extraer_series_temporales_fit(ruta_local):
+    fitfile = FitFile(ruta_local)
     registros = []
     
     for record in fitfile.get_messages('record'):
@@ -133,4 +134,19 @@ def extraer_series_temporales_fit(fit_obj):
             
         registros.append(datos_punto)
         
-    return pd.DataFrame(registros)
+    df_detalles = pd.DataFrame(registros)
+    
+    # --- CÁLCULO SEGUNDO A SEGUNDO DE ZONAS CARDÍACAS ---
+    if not df_detalles.empty and 'heart_rate' in df_detalles.columns:
+        # Definición estándar de zonas basada en FC Máx (185 lpm por defecto)
+        def asignar_zona(hr):
+            if pd.isna(hr) or hr < 90: return "Z1 (Recuperación)"
+            elif hr < 120: return "Z1 (Recuperación)"
+            elif hr < 140: return "Z2 (Aeróbica)"
+            elif hr < 155: return "Z3 (Tempo)"
+            elif hr < 170: return "Z4 (Umbral)"
+            else: return "Z5 (Anaeróbica)"
+            
+        df_detalles['zona_cardiaca'] = df_detalles['heart_rate'].apply(asignar_zona)
+        
+    return df_detalles
