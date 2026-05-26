@@ -60,7 +60,7 @@ def cargar_datos_locales():
 # ==========================================
 # MOTOR DE SINCRONIZACIÓN
 # ==========================================
-st.title("🏃‍♂️ Dashboard de Salud y Rendimiento V2.0")
+st.title("🏃‍♂️ Dashboard de Salud y Rendimiento")
 
 dbx = iniciar_dropbox()
 with st.spinner("Sincronizando archivos con Dropbox... 🔄"):
@@ -100,37 +100,73 @@ if archivos_csv_locales:
         else:
             fecha_filtro_salud = df_salud.index.min()
             
+        # Aplicamos el filtro del periodo actual
         df_salud_filtrado = df_salud[df_salud.index >= fecha_filtro_salud].copy()
         
+        # --- NUEVO: CÁLCULOS DEL AÑO PASADO (YoY) ---
+        inicio_pasado_salud = fecha_filtro_salud - pd.Timedelta(days=365)
+        fin_pasado_salud = fecha_maxima_salud - pd.Timedelta(days=365)
+        df_salud_pasado = df_salud[(df_salud.index >= inicio_pasado_salud) & (df_salud.index <= fin_pasado_salud)]
+        
+        # Promedios Actuales
         media_pasos = df_salud_filtrado['pasos'].mean() if 'pasos' in df_salud_filtrado.columns else 0
         fc_media_global = df_salud_filtrado['fc_media'].mean() if 'fc_media' in df_salud_filtrado.columns else 0
         hrv_medio = df_salud_filtrado['hrv'].mean() if 'hrv' in df_salud_filtrado.columns else 0
         spo2_medio = df_salud_filtrado['spo2'].mean() if 'spo2' in df_salud_filtrado.columns else 0
         sueno_medio = df_salud_filtrado['sueno_total'].mean() if 'sueno_total' in df_salud_filtrado.columns else 0
 
+        # Promedios Históricos (Año pasado)
+        pasos_pasado = df_salud_pasado['pasos'].mean() if not df_salud_pasado.empty and 'pasos' in df_salud_pasado.columns else 0
+        fc_pasado = df_salud_pasado['fc_media'].mean() if not df_salud_pasado.empty and 'fc_media' in df_salud_pasado.columns else 0
+        hrv_pasado = df_salud_pasado['hrv'].mean() if not df_salud_pasado.empty and 'hrv' in df_salud_pasado.columns else 0
+        spo2_pasado = df_salud_pasado['spo2'].mean() if not df_salud_pasado.empty and 'spo2' in df_salud_pasado.columns else 0
+        sueno_pasado = df_salud_pasado['sueno_total'].mean() if not df_salud_pasado.empty and 'sueno_total' in df_salud_pasado.columns else 0
+
         st.markdown(f"### ⚖️ Promedios Diarios ({opcion_periodo_salud})")
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("🚶‍♂️ Pasos / día", f"{media_pasos:,.0f}")
-        c2.metric("❤️ FC Media", f"{fc_media_global:.0f} lpm")
-        c3.metric("🔋 HRV Medio", f"{hrv_medio:.0f} ms")
-        c4.metric("🩸 SpO2 Promedio", f"{spo2_medio * 100 if spo2_medio < 1 else spo2_medio:.1f} %")
-        c5.metric("💤 Sueño / día", f"{sueno_medio:.1f} h")
+        
+        # Métricas con formato Delta (Comparativa YoY)
+        # Nota: Si no hay datos del año pasado (valor 0), no mostramos la flecha de comparativa.
+        
+        dif_pasos = f"{media_pasos - pasos_pasado:,.0f}" if pasos_pasado > 0 else None
+        c1.metric("🚶‍♂️ Pasos / día", f"{media_pasos:,.0f}", dif_pasos)
+        
+        dif_fc = f"{fc_media_global - fc_pasado:.0f} lpm" if fc_pasado > 0 else None
+        c2.metric("❤️ FC Media", f"{fc_media_global:.0f} lpm", dif_fc, delta_color="inverse")
+        
+        dif_hrv = f"{hrv_medio - hrv_pasado:.0f} ms" if hrv_pasado > 0 else None
+        c3.metric("🔋 HRV Medio", f"{hrv_medio:.0f} ms", dif_hrv)
+        
+        dif_spo2 = f"{(spo2_medio - spo2_pasado) * 100 if spo2_medio < 1 else (spo2_medio - spo2_pasado):.1f} %" if spo2_pasado > 0 else None
+        c4.metric("🩸 SpO2 Promedio", f"{spo2_medio * 100 if spo2_medio < 1 else spo2_medio:.1f} %", dif_spo2)
+        
+        dif_sueno = f"{sueno_medio - sueno_pasado:.1f} h" if sueno_pasado > 0 else None
+        c5.metric("💤 Sueño / día", f"{sueno_medio:.1f} h", dif_sueno)
             
         st.divider()
         
-        # --- NUEVO: MAPA DE CALOR DE CONSISTENCIA DE PASOS ---
-        st.markdown("### 🧱 Mapa de Calor de Consistencia (Pasos Diarios)")
+        # --- EVOLUCIÓN DE CONSISTENCIA (LÍNEAS) ---
+        st.markdown("### 🚶‍♂️ Evolución de Actividad (Pasos Diarios)")
         if 'pasos' in df_salud_filtrado.columns:
-            df_heatmap = df_salud_filtrado.copy()
-            df_heatmap['Año'] = df_heatmap.index.year
-            df_heatmap['Mes'] = df_heatmap.index.strftime('%b')
-            df_heatmap['Día_Mes'] = df_heatmap.index.day
+            import plotly.graph_objects as go
+            fig_pasos = go.Figure()
             
-            fig_heat = px.density_heatmap(df_heatmap, x="Día_Mes", y="Mes", z="pasos", 
-                                          histfunc="sum", title="Intensidad de Actividad por Días",
-                                          color_continuous_scale="Viridis", range_color=[3000, 15000])
-            st.plotly_chart(fig_heat, width='stretch')
-
+            # Línea del día a día con área sombreada
+            fig_pasos.add_trace(go.Scatter(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos'], 
+                                           mode='lines', name='Pasos Diarios', 
+                                           line=dict(color='#636EFA', width=1), 
+                                           fill='tozeroy', fillcolor='rgba(99, 110, 250, 0.2)'))
+            
+            # Línea gruesa de tendencia
+            if 'pasos_tendencia' in df_salud_filtrado.columns:
+                fig_pasos.add_trace(go.Scatter(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos_tendencia'], 
+                                               mode='lines', name='Media Semanal', 
+                                               line=dict(color='#deff9a', width=4)))
+            
+            fig_pasos.update_layout(margin=dict(l=0, r=0, t=30, b=0),
+                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_pasos, width='stretch')
+            
         st.divider()
 
         st.markdown("### 📉 Profundización en Tendencias")
