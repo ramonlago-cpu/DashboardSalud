@@ -664,7 +664,7 @@ if datos_entrenos:
             return mejor if diff < 43200 else None   # ±12 horas
 
         # ── Tarjeta por sesión ───────────────────────────────────────────
-        for _, entreno in df_filtrado.iterrows():
+        for _idx, entreno in df_filtrado.reset_index(drop=True).iterrows():
             deporte_raw   = str(entreno.get('deporte', 'otro')).lower()
             deporte_label = deporte_raw.replace('_', ' ').title()
             icono         = _ICONOS.get(deporte_raw, '🏆')
@@ -787,7 +787,7 @@ if datos_entrenos:
                             xaxis_title="Minutos",
                             showlegend=False,
                         )
-                        st.plotly_chart(fig_z, width='stretch')
+                        st.plotly_chart(fig_z, width='stretch', key=f"zonas_{_idx}")
                         st.caption("⚠️ Estimación basada en FC media / FC máxima histórica.")
 
                     # Mapa GPS desde archivo .fit
@@ -802,7 +802,7 @@ if datos_entrenos:
                                 zoom=12, height=300,
                             )
                             fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-                            st.plotly_chart(fig_map, width='stretch')
+                            st.plotly_chart(fig_map, width='stretch', key=f"mapa_{_idx}")
 else:
     st.info("⚠️ Aún no se ha sincronizado el archivo de histórico de entrenamientos.")
 
@@ -851,4 +851,4 @@ if st.button("✨ Generar Análisis Completo de mi Estado"):
 
         except Exception as e:
             st.error(f"Error al conectar con la IA: {e}")
-            st.markdown("Comprueba que has anadido GEMINI_API_KEY a los secretos de Streamlit.")
+            st.markdown("Comprueba que has añadido GEMINI_API_KEY a los secretos de Streamlit.")
