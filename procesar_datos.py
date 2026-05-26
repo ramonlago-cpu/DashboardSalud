@@ -87,6 +87,7 @@ def leer_archivo_fit(ruta_local, nombre_archivo):
                 segundos = int((ritmo_decimal - minutos) * 60)
                 ritmo_str = f"{minutos}:{segundos:02d} min/km"
                 
+                # Cálculo de Eficiencia (solo para Carrera/Caminata)
                 if fc_media and fc_media > 0 and deporte in ['running', 'walking']:
                     velocidad_m_min = (distancia_km * 1000) / duracion_min
                     eficiencia_aerobica = round(velocidad_m_min / fc_media, 2)
@@ -112,39 +113,43 @@ def leer_archivo_fit(ruta_local, nombre_archivo):
             }
             break 
             
-    except Exception as e:
-        # Si el archivo tiene campos propietarios ilegibles, lo ignoramos y devolvemos un dict vacío.
-        # Nuestro app.py ya tiene un .dropna() que limpiará esta entrada automáticamente.
+    except Exception:
+        # Si el archivo está corrupto o tiene campos ilegibles, lo ignoramos y devolvemos vacío
         pass
         
     return datos_entreno
 
 # =====================================================================
-# 3. EXTRAER DATOS DETALLADOS GPS, HR Y ZONAS CARDÍACAS
+# 3. EXTRAER DATOS DETALLADOS GPS, HR Y ZONAS CARDÍACAS (Tolerante a fallos)
 # =====================================================================
 def extraer_series_temporales_fit(ruta_local):
-    fitfile = FitFile(ruta_local)
     registros = []
     
-    for record in fitfile.get_messages('record'):
-        datos_punto = {}
-        for dato in record:
-            datos_punto[dato.name] = dato.value
-            
-        lat = datos_punto.get('position_lat')
-        lon = datos_punto.get('position_long')
+    try:
+        fitfile = FitFile(ruta_local)
         
-        if lat is not None and lon is not None:
-            datos_punto['lat'] = lat * (180.0 / (2**31))
-            datos_punto['lon'] = lon * (180.0 / (2**31))
+        for record in fitfile.get_messages('record'):
+            datos_punto = {}
+            for dato in record:
+                datos_punto[dato.name] = dato.value
+                
+            lat = datos_punto.get('position_lat')
+            lon = datos_punto.get('position_long')
             
-        registros.append(datos_punto)
+            if lat is not None and lon is not None:
+                datos_punto['lat'] = lat * (180.0 / (2**31))
+                datos_punto['lon'] = lon * (180.0 / (2**31))
+                
+            registros.append(datos_punto)
+            
+    except Exception:
+        # Si el GPS del archivo falla al decodificarse, paramos de leer y usamos lo que hayamos podido sacar
+        pass
         
     df_detalles = pd.DataFrame(registros)
     
     # --- CÁLCULO SEGUNDO A SEGUNDO DE ZONAS CARDÍACAS ---
     if not df_detalles.empty and 'heart_rate' in df_detalles.columns:
-        # Definición estándar de zonas basada en FC Máx (185 lpm por defecto)
         def asignar_zona(hr):
             if pd.isna(hr) or hr < 90: return "Z1 (Recuperación)"
             elif hr < 120: return "Z1 (Recuperación)"
