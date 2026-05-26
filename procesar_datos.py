@@ -58,58 +58,64 @@ def analizar_salud_csv(lista_archivos_locales):
         resumen_diario['pasos_tendencia'] = resumen_diario['pasos'].rolling(window=7, min_periods=1).mean()
         
     return resumen_diario
-
+    
 # =====================================================================
-# 2. DECANTAR LOS ARCHIVOS .FIT EN MEMORIA (Con Eficiencia Aeróbica)
+# 2. DECANTAR LOS ARCHIVOS .FIT EN MEMORIA (Con Tolerancia a Fallos)
 # =====================================================================
 def leer_archivo_fit(ruta_local, nombre_archivo):
-    fitfile = FitFile(ruta_local)
     datos_entreno = {}
     
-    for record in fitfile.get_messages('session'):
-        valores = record.get_values()
+    try:
+        fitfile = FitFile(ruta_local)
         
-        distancia_km = round(valores.get("total_distance", 0) / 1000, 2) if valores.get("total_distance") else 0
-        duracion_min = round(valores.get("total_elapsed_time", 0) / 60, 2) if valores.get("total_elapsed_time") else 0
-        fc_media = valores.get("avg_heart_rate", 0)
-        fc_max = valores.get("max_heart_rate", 0)
-        desnivel_positivo = valores.get("total_ascent", 0)
-        deporte = valores.get("sport", "Otros")
-        
-        ritmo_str = "-:--"
-        eficiencia_aerobica = 0
-        
-        if distancia_km > 0 and duracion_min > 0:
-            ritmo_decimal = duracion_min / distancia_km
-            minutos = int(ritmo_decimal)
-            segundos = int((ritmo_decimal - minutos) * 60)
-            ritmo_str = f"{minutos}:{segundos:02d} min/km"
+        for record in fitfile.get_messages('session'):
+            valores = record.get_values()
             
-            # Cálculo de Eficiencia (solo para Carrera/Caminata): Metros por minuto / FC Media
-            if fc_media and fc_media > 0 and deporte in ['running', 'walking']:
-                velocidad_m_min = (distancia_km * 1000) / duracion_min
-                eficiencia_aerobica = round(velocidad_m_min / fc_media, 2)
+            distancia_km = round(valores.get("total_distance", 0) / 1000, 2) if valores.get("total_distance") else 0
+            duracion_min = round(valores.get("total_elapsed_time", 0) / 60, 2) if valores.get("total_elapsed_time") else 0
+            fc_media = valores.get("avg_heart_rate", 0)
+            fc_max = valores.get("max_heart_rate", 0)
+            desnivel_positivo = valores.get("total_ascent", 0)
+            deporte = valores.get("sport", "Otros")
             
-        fc_reserva = 185 - 55
-        intensidad = (fc_media - 55) / fc_reserva if fc_media and fc_reserva > 0 else 0
-        intensidad = max(0, min(intensidad, 1))
-        carga_entreno = round(duracion_min * intensidad * 1.5)
+            ritmo_str = "-:--"
+            eficiencia_aerobica = 0
+            
+            if distancia_km > 0 and duracion_min > 0:
+                ritmo_decimal = duracion_min / distancia_km
+                minutos = int(ritmo_decimal)
+                segundos = int((ritmo_decimal - minutos) * 60)
+                ritmo_str = f"{minutos}:{segundos:02d} min/km"
+                
+                if fc_media and fc_media > 0 and deporte in ['running', 'walking']:
+                    velocidad_m_min = (distancia_km * 1000) / duracion_min
+                    eficiencia_aerobica = round(velocidad_m_min / fc_media, 2)
+                
+            fc_reserva = 185 - 55
+            intensidad = (fc_media - 55) / fc_reserva if fc_media and fc_reserva > 0 else 0
+            intensidad = max(0, min(intensidad, 1))
+            carga_entreno = round(duracion_min * intensidad * 1.5)
 
-        datos_entreno = {
-            "nombre_archivo": nombre_archivo,
-            "deporte": deporte,
-            "fecha_inicio": valores.get("start_time"),
-            "duracion_min": duracion_min,
-            "distancia_km": distancia_km,
-            "ritmo": ritmo_str,
-            "desnivel_positivo": f"{desnivel_positivo} m" if desnivel_positivo else "0 m",
-            "calorias_kcal": valores.get("total_calories", 0),
-            "fc_media": fc_media,
-            "fc_max": fc_max,
-            "carga_entreno": carga_entreno,
-            "eficiencia_aerobica": eficiencia_aerobica
-        }
-        break 
+            datos_entreno = {
+                "nombre_archivo": nombre_archivo,
+                "deporte": deporte,
+                "fecha_inicio": valores.get("start_time"),
+                "duracion_min": duracion_min,
+                "distancia_km": distancia_km,
+                "ritmo": ritmo_str,
+                "desnivel_positivo": f"{desnivel_positivo} m" if desnivel_positivo else "0 m",
+                "calorias_kcal": valores.get("total_calories", 0),
+                "fc_media": fc_media,
+                "fc_max": fc_max,
+                "carga_entreno": carga_entreno,
+                "eficiencia_aerobica": eficiencia_aerobica
+            }
+            break 
+            
+    except Exception as e:
+        # Si el archivo tiene campos propietarios ilegibles, lo ignoramos y devolvemos un dict vacío.
+        # Nuestro app.py ya tiene un .dropna() que limpiará esta entrada automáticamente.
+        pass
         
     return datos_entreno
 
