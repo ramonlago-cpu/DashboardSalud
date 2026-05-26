@@ -3,3 +3,4 @@ pandas
 plotly
 fitparse
 dropbox
+statsmodels
