@@ -5,6 +5,7 @@ import dropbox
 import os
 import glob
 import gc  # <-- AÑADE ESTA LÍNEA (Garbage Collector)
+import time  # <-- AÑADE ESTA LÍNEA PARA LAS MICROPAUSAS
 from procesar_datos import analizar_salud_csv, leer_archivo_fit, extraer_series_temporales_fit
 
 st.set_page_config(page_title="Mi Dashboard de Salud V2.0", layout="wide")
@@ -50,24 +51,43 @@ def cargar_datos_locales():
     rutas_csv = glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv"))
     rutas_fit = glob.glob(os.path.join(DIR_LOCAL_FIT, "*.fit"))
     
-    # --- ESCUDO ANTI-COLAPSO DE MEMORIA ---
-    # 1. Ordenamos los archivos por fecha de modificación (los más nuevos primero)
+    # Ordenamos del más nuevo al más antiguo
     rutas_fit.sort(key=os.path.getmtime, reverse=True)
     
-    # 2. Limitamos la lectura a los 100 entrenamientos más recientes
-    rutas_fit = rutas_fit[:100] 
+    # Subimos el límite a 150 para recuperar tu histórico anual de entrenamientos
+    rutas_fit = rutas_fit[:150] 
     
     entrenos_data = []
-    for ruta in rutas_fit:
+    
+    # --- INTERFAZ: ELEMENTOS DE PROGRESO ---
+    texto_progreso = st.empty()
+    barra_progreso = st.progress(0)
+    
+    total_archivos = len(rutas_fit)
+    
+    for i, ruta in enumerate(rutas_fit):
         nombre_archivo = os.path.basename(ruta)
-        datos = leer_archivo_fit(ruta, nombre_archivo)
         
-        if datos: # Solo lo añadimos si no devolvió un error
+        # 1. Actualizamos la interfaz visual
+        texto_progreso.markdown(f"**⏳ Procesando entrenamiento {i+1} de {total_archivos}...**")
+        barra_progreso.progress((i + 1) / total_archivos)
+        
+        # 2. Leemos el archivo
+        datos = leer_archivo_fit(ruta, nombre_archivo)
+        if datos:
             entrenos_data.append(datos)
             
-        # 3. Forzamos a Python a limpiar la RAM tras cada archivo
+        # 3. Limpiamos la RAM
         gc.collect()
         
+        # 4. EL TRUCO MÁGICO: Hacemos que el procesador "respire" 50 milisegundos.
+        # Esto libera el hilo de ejecución para que el WebSocket no se desconecte.
+        time.sleep(0.05)
+        
+    # Limpiamos los textos y la barra al terminar para dejar la web limpia
+    texto_progreso.empty()
+    barra_progreso.empty()
+    
     return rutas_csv, entrenos_data
 
 # ==========================================
