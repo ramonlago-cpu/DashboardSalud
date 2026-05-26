@@ -381,3 +381,64 @@ if datos_entrenos:
                             st.error("Archivo no encontrado.")
 else:
     st.info("No se encontraron entrenamientos .fit.")
+    
+# ==========================================
+# SECCIÓN 3: ENTRENADOR VIRTUAL IA (GEMINI)
+# ==========================================
+st.divider()
+st.header("🤖 AI Coach: Análisis de Fisiología Deportiva")
+st.markdown("Gemini cruzará tus datos de recuperación, sueño y carga para darte un diagnóstico profesional.")
+
+if st.button("✨ Generar Análisis de mi Estado Actual"):
+    with st.spinner("Analizando biomarcadores y carga de entrenamiento..."):
+        try:
+            import google.generativeai as genai
+            
+            # Autenticación con la clave de tus secretos
+            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            modelo = genai.GenerativeModel('gemini-1.5-flash')
+            
+            # Recopilamos las variables calculadas previamente (con valores seguros por si falta algo)
+            p_pasos = f"{media_pasos:,.0f}" if 'media_pasos' in locals() else "Sin datos"
+            p_hrv = f"{hrv_medio:.0f} ms" if 'hrv_medio' in locals() else "Sin datos"
+            p_sueno = f"{sueno_medio:.1f} h" if 'sueno_medio' in locals() else "Sin datos"
+            p_fc = f"{fc_media_global:.0f} lpm" if 'fc_media_global' in locals() else "Sin datos"
+            
+            p_atl = f"{atl_actual:.0f}" if 'atl_actual' in locals() else "0"
+            p_ctl = f"{ctl_actual:.0f}" if 'ctl_actual' in locals() else "0"
+            p_ratio = f"{ratio_carga:.2f}" if 'ratio_carga' in locals() else "0"
+
+            # El Prompt maestro que le da contexto a la IA
+            prompt = f"""
+            Actúa como un fisiólogo deportivo y entrenador personal de élite.
+            Analiza mis métricas de salud y entrenamiento de los últimos 30 días y dame un resumen breve, directo y profesional.
+
+            MIS DATOS DE SALUD (Promedios diarios):
+            - Pasos: {p_pasos}
+            - Variabilidad Cardíaca (HRV): {p_hrv}
+            - Sueño: {p_sueno}
+            - FC Media: {p_fc}
+
+            MIS DATOS DE ENTRENAMIENTO (Modelo TSB):
+            - Carga Aguda (Fatiga actual - ATL): {p_atl}
+            - Carga Crónica (Fitness asimilado - CTL): {p_ctl}
+            - Ratio de Riesgo de Lesión (ATL/CTL): {p_ratio} (Nota: >1.2 es sobrecarga, >1.5 es riesgo alto).
+
+            Por favor, genera tu respuesta estructurada en:
+            1. 🩺 **Diagnóstico General:** Cómo está mi cuerpo asimilando el entrenamiento en base a la fatiga y el descanso.
+            2. ⚠️ **Alertas o Puntos de Mejora:** Relaciona el sueño/HRV con la carga de entrenamiento si ves discrepancias.
+            3. 💡 **Recomendación para hoy:** ¿Apretar, descanso activo, o mantener el volumen?
+
+            Usa un tono motivador pero muy científico, directo y conciso. No inventes datos, cíñete a los que te he proporcionado.
+            """
+            
+            # Llamada a la IA
+            respuesta = modelo.generate_content(prompt)
+            
+            st.success("✅ Análisis completado con éxito.")
+            # st.info crea un recuadro con fondo destacado para la respuesta
+            st.info(respuesta.text)
+            
+        except Exception as e:
+            st.error(f"Error al conectar con la IA: {e}")
+            st.markdown("⚠️ Comprueba que has añadido `GEMINI_API_KEY` a los secretos (Secrets) de Streamlit.")

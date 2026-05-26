@@ -4,3 +4,4 @@ plotly
 fitparse
 dropbox
 statsmodels
+google-generativeai
