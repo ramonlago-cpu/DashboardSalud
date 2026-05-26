@@ -1,9 +1,12 @@
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 import pandas as pd
 import dropbox
 import os
 import glob
+import threading
+from datetime import datetime
 from procesar_datos import analizar_salud_csv
 
 st.set_page_config(page_title="Mi Dashboard de Salud V3.1", layout="wide")
@@ -11,8 +14,8 @@ st.set_page_config(page_title="Mi Dashboard de Salud V3.1", layout="wide")
 # ==========================================
 # CONFIGURACIÓN DE DROPBOX Y RUTAS LOCALES
 # ==========================================
-CARPETA_DROPBOX_CSV = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthExport" 
-CARPETA_DROPBOX_FIT = "/Aplicaciones/HealthFitExporter" 
+CARPETA_DROPBOX_CSV = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthExport"
+CARPETA_DROPBOX_FIT = "/Aplicaciones/HealthFitExporter"
 
 DIR_LOCAL_CSV = "datos_locales/csv"
 DIR_LOCAL_FIT = "datos_locales/fit"
@@ -20,67 +23,127 @@ DIR_LOCAL_FIT = "datos_locales/fit"
 os.makedirs(DIR_LOCAL_CSV, exist_ok=True)
 os.makedirs(DIR_LOCAL_FIT, exist_ok=True)
 
+# Lock a nivel de módulo: garantiza que solo UN hilo ejecuta la sync
+# aunque varios usuarios carguen la app a la vez (startup en frío).
+_sync_lock = threading.Lock()
+
+
 @st.cache_resource
 def iniciar_dropbox():
+    """Crea el cliente Dropbox una sola vez y lo reutiliza en todas las sesiones."""
+    claves_requeridas = ["DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN"]
+    for clave in claves_requeridas:
+        if clave not in st.secrets:
+            st.error(
+                f"⚠️ Falta el secret **{clave}** en Streamlit Cloud. "
+                "Ve a Settings → Secrets y añádelo."
+            )
+            st.stop()
     return dropbox.Dropbox(
         app_key=st.secrets["DROPBOX_APP_KEY"],
         app_secret=st.secrets["DROPBOX_APP_SECRET"],
         oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
     )
 
+
 def sincronizar_carpeta(dbx, ruta_dbx, ruta_local, extension):
+    """Descarga solo los archivos nuevos o modificados. Escritura atómica para evitar
+    corrupción si dos sesiones coinciden descargando el mismo archivo."""
     ruta_api = "" if ruta_dbx == "/" else ruta_dbx
     nuevos = 0
     try:
         resultado = dbx.files_list_folder(ruta_api)
-        archivos_nube = [e for e in resultado.entries if isinstance(e, dropbox.files.FileMetadata) and e.name.endswith(extension)]
-        
+        archivos_nube = [
+            e for e in resultado.entries
+            if isinstance(e, dropbox.files.FileMetadata) and e.name.endswith(extension)
+        ]
+
         for entrada in archivos_nube:
-            ruta_descarga = os.path.join(ruta_local, entrada.name)
-            necesita_descarga = True
-            
-            if os.path.exists(ruta_descarga):
-                if os.path.getsize(ruta_descarga) == entrada.size:
-                    necesita_descarga = False
-                    
-            if necesita_descarga:
-                dbx.files_download_to_file(ruta_descarga, entrada.path_lower)
+            ruta_destino = os.path.join(ruta_local, entrada.name)
+            # Solo descarga si el archivo no existe o tiene tamaño diferente
+            if os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) == entrada.size:
+                continue
+            # Descarga a .tmp y luego renombra (operación atómica en el SO)
+            ruta_tmp = ruta_destino + ".tmp"
+            try:
+                dbx.files_download_to_file(ruta_tmp, entrada.path_lower)
+                os.replace(ruta_tmp, ruta_destino)
                 nuevos += 1
+            except Exception as e_descarga:
+                if os.path.exists(ruta_tmp):
+                    os.remove(ruta_tmp)
+                st.warning(f"No se pudo descargar {entrada.name}: {e_descarga}")
+
         return nuevos
     except Exception as e:
-        st.error(f"Error sincronizando la ruta {ruta_dbx}: {e}")
+        st.error(f"Error al listar la carpeta Dropbox {ruta_dbx}: {e}")
         return 0
 
-@st.cache_data(show_spinner=False)
-def cargar_datos_locales():
-    rutas_csv = glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv"))
-    ruta_historico = os.path.join(DIR_LOCAL_FIT, "historico_entrenamientos.csv")
-    entrenos_data = []
-    
-    if os.path.exists(ruta_historico):
-        df_historico = pd.read_csv(ruta_historico)
-        entrenos_data = df_historico.to_dict('records')
-        
-    return rutas_csv, entrenos_data
 
 # ==========================================
-# MOTOR DE SINCRONIZACIÓN CON CACHÉ TEMPORAL (4 HORAS)
+# MOTOR DE SINCRONIZACIÓN CON CACHÉ (4 HORAS)
+# El lock garantiza que si varios usuarios cargan la app
+# simultáneamente con caché fría, solo uno ejecuta la sync.
 # ==========================================
 @st.cache_data(ttl=14400, show_spinner=False)
 def sincronizacion_global_dropbox():
-    dbx_conn = iniciar_dropbox()
-    n_csv = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_CSV, DIR_LOCAL_CSV, ".csv")
-    n_fit = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".csv")
-    return n_csv, n_fit
+    with _sync_lock:
+        dbx_conn = iniciar_dropbox()
+        n_csv = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_CSV, DIR_LOCAL_CSV, ".csv")
+        n_fit = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".csv")
+    return n_csv, n_fit, datetime.now().strftime("%d/%m/%Y %H:%M")
 
+
+@st.cache_data(show_spinner=False)
+def cargar_datos_locales():
+    rutas_csv = sorted(glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv")))
+    ruta_historico = os.path.join(DIR_LOCAL_FIT, "historico_entrenamientos.csv")
+    entrenos_data = []
+
+    if os.path.exists(ruta_historico):
+        df_historico = pd.read_csv(ruta_historico)
+        entrenos_data = df_historico.to_dict("records")
+
+    return rutas_csv, entrenos_data
+
+
+@st.cache_data(show_spinner=False)
+def cargar_y_analizar_salud(rutas_tuple):
+    """Cachea el resultado del procesado de CSVs. Recibe tupla (hasheable)
+    para que Streamlit pueda usar las rutas como clave de caché."""
+    return analizar_salud_csv(list(rutas_tuple))
+
+
+# ==========================================
+# CABECERA Y SINCRONIZACIÓN
+# ==========================================
 st.title("🏃‍♂️ Dashboard de Salud y Rendimiento")
 
-with st.spinner("Sincronizando archivos con Dropbox (Solo 1 vez cada 4h)... 🔄"):
-    nuevos_csv, nuevos_fit = sincronizacion_global_dropbox()
-    
-    if nuevos_csv > 0 or nuevos_fit > 0:
-        st.toast(f"✅ ¡Nuevos datos! Actualizados {nuevos_csv + nuevos_fit} archivos.")
+# Evitamos volver a llamar a la sync si ya lo hicimos en esta sesión
+if "sync_done" not in st.session_state:
+    with st.spinner("Sincronizando con Dropbox (máx. 1 vez cada 4h)... 🔄"):
+        nuevos_csv, nuevos_fit, ts_sync = sincronizacion_global_dropbox()
+        st.session_state["sync_done"] = True
+        st.session_state["ts_sync"] = ts_sync
+        if nuevos_csv > 0 or nuevos_fit > 0:
+            st.toast(f"✅ ¡Nuevos datos! {nuevos_csv + nuevos_fit} archivos actualizados.")
+            cargar_datos_locales.clear()
+            cargar_y_analizar_salud.clear()
+
+# Barra lateral: estado de la sync y botón de refresco manual
+with st.sidebar:
+    st.markdown("### ⚙️ Sincronización")
+    if "ts_sync" in st.session_state:
+        st.caption(f"Última sync: {st.session_state['ts_sync']}")
+    if st.button("🔄 Forzar re-sincronización"):
+        sincronizacion_global_dropbox.clear()
         cargar_datos_locales.clear()
+        cargar_y_analizar_salud.clear()
+        for key in ["sync_done", "ts_sync"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+    st.divider()
+    st.caption("Datos: Apple Health + Apple Watch Ultra 2")
 
 with st.spinner("Cargando datos históricos... 🚀"):
     archivos_csv_locales, datos_entrenos = cargar_datos_locales()
@@ -91,7 +154,9 @@ with st.spinner("Cargando datos históricos... 🚀"):
 st.header("📊 Análisis de Salud General")
 
 if archivos_csv_locales:
-    df_salud = analizar_salud_csv(archivos_csv_locales)
+    # Usamos cargar_y_analizar_salud (cacheada) en lugar de llamar directamente
+    # a analizar_salud_csv, que re-leería todos los CSVs en cada render.
+    df_salud = cargar_y_analizar_salud(tuple(archivos_csv_locales))
     
     if not df_salud.empty:
         st.markdown("### 📅 Filtro de Periodo")
@@ -151,7 +216,6 @@ if archivos_csv_locales:
         
         st.markdown("### 🚶‍♂️ Evolución de Actividad (Pasos Diarios)")
         if 'pasos' in df_salud_filtrado.columns:
-            import plotly.graph_objects as go
             fig_pasos = go.Figure()
             fig_pasos.add_trace(go.Scatter(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos'], 
                                         mode='lines', name='Pasos Diarios', 
@@ -163,7 +227,7 @@ if archivos_csv_locales:
                                             line=dict(color='#deff9a', width=4)))
             fig_pasos.update_layout(margin=dict(l=0, r=0, t=30, b=0),
                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_pasos, width='stretch')
+            st.plotly_chart(fig_pasos, use_container_width=True)
             
         st.divider()
 
@@ -175,15 +239,14 @@ if archivos_csv_locales:
             with col_fc:
                 if 'fc_media' in df_salud_filtrado.columns:
                     fig_fc = px.line(df_salud_filtrado, x=df_salud_filtrado.index, y=['fc_media', 'fc_media_tendencia'], title="Frecuencia Cardíaca Media", color_discrete_sequence=['#FF4B4B', '#8B0000'])
-                    st.plotly_chart(fig_fc, width='stretch')
+                    st.plotly_chart(fig_fc, use_container_width=True)
             with col_hrv:
                 if 'hrv' in df_salud_filtrado.columns:
                     fig_hrv = px.line(df_salud_filtrado, x=df_salud_filtrado.index, y=['hrv', 'hrv_tendencia'], title="Variabilidad (HRV)", color_discrete_sequence=['#00CC96', '#006400'])
-                    st.plotly_chart(fig_hrv, width='stretch')
+                    st.plotly_chart(fig_hrv, use_container_width=True)
 
         with tab2:
             if all(col in df_salud_filtrado.columns for col in ['sueno_total', 'sueno_profundo', 'sueno_rem']):
-                import plotly.graph_objects as go
                 fig_sueno = go.Figure()
                 df_salud_filtrado['sueno_ligero'] = df_salud_filtrado['sueno_total'] - df_salud_filtrado['sueno_profundo'] - df_salud_filtrado['sueno_rem']
                 df_salud_filtrado['sueno_ligero'] = df_salud_filtrado['sueno_ligero'].clip(lower=0)
@@ -191,14 +254,14 @@ if archivos_csv_locales:
                 fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_rem'], name='REM', marker_color='#9467bd'))
                 fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_ligero'], name='Ligero', marker_color='#aec7e8'))
                 fig_sueno.update_layout(barmode='stack', title="Fases del Sueño por Noches", yaxis_title="Horas")
-                st.plotly_chart(fig_sueno, width='stretch')
+                st.plotly_chart(fig_sueno, use_container_width=True)
 
         with tab3:
             if 'pasos' in df_salud_filtrado.columns:
                 fig_pasos = go.Figure()
                 fig_pasos.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos'], name='Pasos', marker_color='#636EFA', opacity=0.6))
                 fig_pasos.update_layout(margin=dict(l=0, r=0, t=30, b=0))
-                st.plotly_chart(fig_pasos, width='stretch')
+                st.plotly_chart(fig_pasos, use_container_width=True)
                 
         with tab4:
             st.markdown("**🔍 Cruce de Variables: Descubriendo Causalidades**")
@@ -207,7 +270,7 @@ if archivos_csv_locales:
                 fig_matrix = px.scatter_matrix(df_salud_filtrado, dimensions=cols_analisis, color="hrv",
                                             title="Matriz de Dependencias (Saturación de color = Recuperación HRV)",
                                             color_continuous_scale="Peach")
-                st.plotly_chart(fig_matrix, width='stretch')
+                st.plotly_chart(fig_matrix, use_container_width=True)
 else:
     st.warning("⚠️ No se han encontrado archivos CSV locales.")
 
@@ -263,7 +326,7 @@ if datos_entrenos:
             fig_ef = px.scatter(df_running, x='fecha_inicio', y='eficiencia_aerobica', trendline="lowess",
                             title="Eficiencia en Carrera (Metros por minuto / Latido) - ¡Hacia arriba es mejor!",
                             color_discrete_sequence=['#deff9a'])
-            st.plotly_chart(fig_ef, width='stretch')
+            st.plotly_chart(fig_ef, use_container_width=True)
 
         st.divider()
 
