@@ -4,11 +4,9 @@ import pandas as pd
 import dropbox
 import os
 import glob
-import gc  # <-- AÑADE ESTA LÍNEA (Garbage Collector)
-import time  # <-- AÑADE ESTA LÍNEA PARA LAS MICROPAUSAS
-from procesar_datos import analizar_salud_csv, leer_archivo_fit, extraer_series_temporales_fit
+from procesar_datos import analizar_salud_csv
 
-st.set_page_config(page_title="Mi Dashboard de Salud V2.0", layout="wide")
+st.set_page_config(page_title="Mi Dashboard de Salud V3.0", layout="wide")
 
 # ==========================================
 # CONFIGURACIÓN DE DROPBOX Y RUTAS LOCALES
@@ -34,11 +32,17 @@ def sincronizar_carpeta(dbx, ruta_dbx, ruta_local, extension):
     try:
         resultado = dbx.files_list_folder(ruta_api)
         archivos_nube = [e for e in resultado.entries if isinstance(e, dropbox.files.FileMetadata) and e.name.endswith(extension)]
-        archivos_locales = set(os.listdir(ruta_local))
         
         for entrada in archivos_nube:
-            if entrada.name not in archivos_locales:
-                ruta_descarga = os.path.join(ruta_local, entrada.name)
+            ruta_descarga = os.path.join(ruta_local, entrada.name)
+            necesita_descarga = True
+            
+            # Si el archivo ya existe, comprobamos si el de Dropbox es diferente (pesa distinto)
+            if os.path.exists(ruta_descarga):
+                if os.path.getsize(ruta_descarga) == entrada.size:
+                    necesita_descarga = False
+                    
+            if necesita_descarga:
                 dbx.files_download_to_file(ruta_descarga, entrada.path_lower)
                 nuevos += 1
         return nuevos
@@ -48,46 +52,17 @@ def sincronizar_carpeta(dbx, ruta_dbx, ruta_local, extension):
 
 @st.cache_data(show_spinner=False)
 def cargar_datos_locales():
+    # 1. Rutas de salud
     rutas_csv = glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv"))
-    rutas_fit = glob.glob(os.path.join(DIR_LOCAL_FIT, "*.fit"))
     
-    # Ordenamos del más nuevo al más antiguo
-    rutas_fit.sort(key=os.path.getmtime, reverse=True)
-    
-    # Subimos el límite a 150 para recuperar tu histórico anual de entrenamientos
-    rutas_fit = rutas_fit[:150] 
-    
+    # 2. Ruta de tu nuevo archivo maestro de entrenamientos (generado en tu PC)
+    ruta_historico = os.path.join(DIR_LOCAL_FIT, "historico_entrenamientos.csv")
     entrenos_data = []
     
-    # --- INTERFAZ: ELEMENTOS DE PROGRESO ---
-    texto_progreso = st.empty()
-    barra_progreso = st.progress(0)
-    
-    total_archivos = len(rutas_fit)
-    
-    for i, ruta in enumerate(rutas_fit):
-        nombre_archivo = os.path.basename(ruta)
+    if os.path.exists(ruta_historico):
+        df_historico = pd.read_csv(ruta_historico)
+        entrenos_data = df_historico.to_dict('records')
         
-        # 1. Actualizamos la interfaz visual
-        texto_progreso.markdown(f"**⏳ Procesando entrenamiento {i+1} de {total_archivos}...**")
-        barra_progreso.progress((i + 1) / total_archivos)
-        
-        # 2. Leemos el archivo
-        datos = leer_archivo_fit(ruta, nombre_archivo)
-        if datos:
-            entrenos_data.append(datos)
-            
-        # 3. Limpiamos la RAM
-        gc.collect()
-        
-        # 4. EL TRUCO MÁGICO: Hacemos que el procesador "respire" 50 milisegundos.
-        # Esto libera el hilo de ejecución para que el WebSocket no se desconecte.
-        time.sleep(0.05)
-        
-    # Limpiamos los textos y la barra al terminar para dejar la web limpia
-    texto_progreso.empty()
-    barra_progreso.empty()
-    
     return rutas_csv, entrenos_data
 
 # ==========================================
@@ -97,11 +72,14 @@ st.title("🏃‍♂️ Dashboard de Salud y Rendimiento")
 
 dbx = iniciar_dropbox()
 with st.spinner("Sincronizando archivos con Dropbox... 🔄"):
+    # Sincronizamos la salud
     nuevos_csv = sincronizar_carpeta(dbx, CARPETA_DROPBOX_CSV, DIR_LOCAL_CSV, ".csv")
-    nuevos_fit = sincronizar_carpeta(dbx, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".fit")
+    
+    # 🔥 EL GRAN CAMBIO: Buscamos únicamente ".csv" en la carpeta donde tienes los entrenos
+    nuevos_fit = sincronizar_carpeta(dbx, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".csv")
     
     if nuevos_csv > 0 or nuevos_fit > 0:
-        st.toast(f"✅ ¡Nuevos datos! Descargados {nuevos_csv} CSVs y {nuevos_fit} FITs.")
+        st.toast(f"✅ ¡Nuevos datos! Actualizados {nuevos_csv + nuevos_fit} archivos.")
         cargar_datos_locales.clear()
 
 with st.spinner("Cargando datos históricos... 🚀"):
@@ -133,22 +111,18 @@ if archivos_csv_locales:
         else:
             fecha_filtro_salud = df_salud.index.min()
             
-        # Aplicamos el filtro del periodo actual
         df_salud_filtrado = df_salud[df_salud.index >= fecha_filtro_salud].copy()
         
-        # --- NUEVO: CÁLCULOS DEL AÑO PASADO (YoY) ---
         inicio_pasado_salud = fecha_filtro_salud - pd.Timedelta(days=365)
         fin_pasado_salud = fecha_maxima_salud - pd.Timedelta(days=365)
         df_salud_pasado = df_salud[(df_salud.index >= inicio_pasado_salud) & (df_salud.index <= fin_pasado_salud)]
         
-        # Promedios Actuales
         media_pasos = df_salud_filtrado['pasos'].mean() if 'pasos' in df_salud_filtrado.columns else 0
         fc_media_global = df_salud_filtrado['fc_media'].mean() if 'fc_media' in df_salud_filtrado.columns else 0
         hrv_medio = df_salud_filtrado['hrv'].mean() if 'hrv' in df_salud_filtrado.columns else 0
         spo2_medio = df_salud_filtrado['spo2'].mean() if 'spo2' in df_salud_filtrado.columns else 0
         sueno_medio = df_salud_filtrado['sueno_total'].mean() if 'sueno_total' in df_salud_filtrado.columns else 0
 
-        # Promedios Históricos (Año pasado)
         pasos_pasado = df_salud_pasado['pasos'].mean() if not df_salud_pasado.empty and 'pasos' in df_salud_pasado.columns else 0
         fc_pasado = df_salud_pasado['fc_media'].mean() if not df_salud_pasado.empty and 'fc_media' in df_salud_pasado.columns else 0
         hrv_pasado = df_salud_pasado['hrv'].mean() if not df_salud_pasado.empty and 'hrv' in df_salud_pasado.columns else 0
@@ -157,9 +131,6 @@ if archivos_csv_locales:
 
         st.markdown(f"### ⚖️ Promedios Diarios ({opcion_periodo_salud})")
         c1, c2, c3, c4, c5 = st.columns(5)
-        
-        # Métricas con formato Delta (Comparativa YoY)
-        # Nota: Si no hay datos del año pasado (valor 0), no mostramos la flecha de comparativa.
         
         dif_pasos = f"{media_pasos - pasos_pasado:,.0f}" if pasos_pasado > 0 else None
         c1.metric("🚶‍♂️ Pasos / día", f"{media_pasos:,.0f}", dif_pasos)
@@ -178,24 +149,18 @@ if archivos_csv_locales:
             
         st.divider()
         
-        # --- EVOLUCIÓN DE CONSISTENCIA (LÍNEAS) ---
         st.markdown("### 🚶‍♂️ Evolución de Actividad (Pasos Diarios)")
         if 'pasos' in df_salud_filtrado.columns:
             import plotly.graph_objects as go
             fig_pasos = go.Figure()
-            
-            # Línea del día a día con área sombreada
             fig_pasos.add_trace(go.Scatter(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos'], 
                                            mode='lines', name='Pasos Diarios', 
                                            line=dict(color='#636EFA', width=1), 
                                            fill='tozeroy', fillcolor='rgba(99, 110, 250, 0.2)'))
-            
-            # Línea gruesa de tendencia
             if 'pasos_tendencia' in df_salud_filtrado.columns:
                 fig_pasos.add_trace(go.Scatter(x=df_salud_filtrado.index, y=df_salud_filtrado['pasos_tendencia'], 
                                                mode='lines', name='Media Semanal', 
                                                line=dict(color='#deff9a', width=4)))
-            
             fig_pasos.update_layout(margin=dict(l=0, r=0, t=30, b=0),
                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             st.plotly_chart(fig_pasos, width='stretch')
@@ -203,7 +168,7 @@ if archivos_csv_locales:
         st.divider()
 
         st.markdown("### 📉 Profundización en Tendencias")
-        tab1, tab2, tab3, tab4 = st.tabs(["❤️ Corazón y HRV", "💤 Análisis del Sueño", "🔥 Actividad", "🔀 Matriz de Correlación (Cruces)"])
+        tab1, tab2, tab3, tab4 = st.tabs(["❤️ Corazón y HRV", "💤 Análisis del Sueño", "🔥 Actividad", "🔀 Matriz de Correlación"])
         
         with tab1:
             col_fc, col_hrv = st.columns(2)
@@ -239,7 +204,6 @@ if archivos_csv_locales:
             st.markdown("**🔍 Cruce de Variables: Descubriendo Causalidades**")
             cols_analisis = [c for c in ['sueno_total', 'sueno_profundo', 'hrv', 'fc_media', 'pasos'] if c in df_salud_filtrado.columns]
             if len(cols_analisis) > 1:
-                # Dibujamos un scatter matrix cruzando todo contra todo con línea de regresión estadistica OLS
                 fig_matrix = px.scatter_matrix(df_salud_filtrado, dimensions=cols_analisis, color="hrv",
                                                title="Matriz de Dependencias (Saturación de color = Recuperación HRV)",
                                                color_continuous_scale="Peach")
@@ -292,11 +256,10 @@ if datos_entrenos:
             
             st.divider()
 
-        # --- NUEVO: EVOLUCIÓN DE EFICIENCIA AERÓBICA HISTÓRICA ---
+        # --- EVOLUCIÓN DE EFICIENCIA AERÓBICA HISTÓRICA ---
         st.markdown("### 📈 Evolución del Índice de Eficiencia Aeróbica")
         df_running = df_entrenos[df_entrenos['deporte'] == 'running'].copy()
         if not df_running.empty and 'eficiencia_aerobica' in df_running.columns:
-            # CAMBIO AQUÍ: Usamos px.scatter para que la línea de tendencia (trendline) funcione
             fig_ef = px.scatter(df_running, x='fecha_inicio', y='eficiencia_aerobica', trendline="lowess",
                              title="Eficiencia en Carrera (Metros por minuto / Latido) - ¡Hacia arriba es mejor!",
                              color_discrete_sequence=['#deff9a'])
@@ -340,7 +303,7 @@ if datos_entrenos:
         
         st.divider()
         
-        # --- DETALLE DE SESIONES CON ZONAS CARDÍACAS DETALLADAS ---
+        # --- DETALLE DE SESIONES (Modo Compacto sin mapa GPS) ---
         st.markdown(f"### 📝 Detalle de Sesiones ({opcion_periodo})")
         df_filtrado = df_filtrado.sort_values('fecha_inicio', ascending=False)
         
@@ -351,7 +314,6 @@ if datos_entrenos:
             fecha_str = entreno['fecha_inicio'].strftime('%d-%m-%Y') if pd.notnull(entreno['fecha_inicio']) else ""
             ef_entreno = entreno.get('eficiencia_aerobica', 0)
             
-            # Añadimos el dato de la eficiencia aeróbica directamente a la cabecera del expansor si existe
             txt_ef = f" | EF: {ef_entreno}" if ef_entreno > 0 else ""
             
             with st.expander(f"➔ {fecha_str} | {deporte}: {archivo} ({distancia} km){txt_ef}"):
@@ -367,53 +329,8 @@ if datos_entrenos:
                 c6.metric("FC Máxima", f"{entreno.get('fc_max', 0)} lpm")
                 c7.metric("Calorías", f"{entreno.get('calorias_kcal', 0)} kcal")
                 c8.metric("Carga TRIMP", f"{entreno.get('carga_entreno', 0)} pts")
-                
-                st.divider() 
-                
-                if st.button(f"📊 Cargar gráficos y mapa", key=archivo):
-                    with st.spinner('Procesando datos segundo a segundo...'):
-                        ruta_local = os.path.join(DIR_LOCAL_FIT, archivo)
-                        
-                        if os.path.exists(ruta_local):
-                            df_detalles = extraer_series_temporales_fit(ruta_local)
-                            
-                            if not df_detalles.empty:
-                                col_grafico, col_zonas, col_mapa = st.columns([2, 1, 1])
-                                
-                                with col_grafico:
-                                    st.markdown("**❤️ Evolución de la Frecuencia Cardíaca**")
-                                    if 'heart_rate' in df_detalles.columns and 'timestamp' in df_detalles.columns:
-                                        df_hr = df_detalles.dropna(subset=['heart_rate', 'timestamp'])
-                                        fig_hr = px.line(df_hr, x='timestamp', y='heart_rate', color_discrete_sequence=['#FF4B4B'])
-                                        st.plotly_chart(fig_hr, width='stretch')
-                                        
-                                # --- NUEVA COLUMNA VISUAL: GRÁFICO DE DONUT DE ZONAS CARDÍACAS ---
-                                with col_zonas:
-                                    st.markdown("**🎯 Distribución de Intensidad**")
-                                    if 'zona_cardiaca' in df_detalles.columns:
-                                        fig_pie_zonas = px.pie(df_detalles, names='zona_cardiaca', hole=0.4,
-                                                               color_discrete_map={
-                                                                   "Z1 (Recuperación)": "#00cc96",
-                                                                   "Z2 (Aeróbica)": "#deff9a",
-                                                                   "Z3 (Tempo)": "#facc15",
-                                                                   "Z4 (Umbral)": "#ff7f0e",
-                                                                   "Z5 (Anaeróbica)": "#ff4b4b"
-                                                               })
-                                        fig_pie_zonas.update_layout(showlegend=False, margin=dict(l=0, r=0, t=0, b=0))
-                                        st.plotly_chart(fig_pie_zonas, width='stretch')
-                                        
-                                with col_mapa:
-                                    st.markdown("**🗺️ Ruta GPS**")
-                                    if 'lat' in df_detalles.columns and 'lon' in df_detalles.columns:
-                                        df_gps = df_detalles.dropna(subset=['lat', 'lon'])
-                                        if not df_gps.empty:
-                                            st.map(df_gps, zoom=13, width='stretch')
-                                        else:
-                                            st.info("Sin señal GPS.")
-                        else:
-                            st.error("Archivo no encontrado.")
 else:
-    st.info("No se encontraron entrenamientos .fit.")
+    st.info("⚠️ Aún no se ha sincronizado el archivo de histórico de entrenamientos.")
     
 # ==========================================
 # SECCIÓN 3: ENTRENADOR VIRTUAL IA (GEMINI)
@@ -427,10 +344,8 @@ if st.button("✨ Generar Análisis Completo de mi Estado"):
         try:
             from google import genai
             
-            # Inicialización del cliente con tu clave secreta
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
             
-            # Recopilamos las variables calculadas previamente
             p_pasos = f"{media_pasos:,.0f}" if 'media_pasos' in locals() else "Sin datos"
             p_hrv = f"{hrv_medio:.0f} ms" if 'hrv_medio' in locals() else "Sin datos"
             p_sueno = f"{sueno_medio:.1f} h" if 'sueno_medio' in locals() else "Sin datos"
@@ -440,7 +355,6 @@ if st.button("✨ Generar Análisis Completo de mi Estado"):
             p_ctl = f"{ctl_actual:.0f}" if 'ctl_actual' in locals() else "0"
             p_ratio = f"{ratio_carga:.2f}" if 'ratio_carga' in locals() else "0"
 
-            # El Prompt maestro reestructurado para 2 informes separados
             prompt = f"""
             Actúa como un médico deportivo y entrenador personal de élite.
             Analiza mis métricas de los últimos 30 días y redacta DOS informes separados pero que se entiendan entre sí.
@@ -467,7 +381,6 @@ if st.button("✨ Generar Análisis Completo de mi Estado"):
             Usa un tono motivador, directo y científico.
             """
             
-            # Llamada al modelo de última generación
             respuesta = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt,
