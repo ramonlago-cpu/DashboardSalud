@@ -21,13 +21,15 @@ DIR_LOCAL_FIT = "datos_locales/fit"
 os.makedirs(DIR_LOCAL_CSV, exist_ok=True)
 os.makedirs(DIR_LOCAL_FIT, exist_ok=True)
 
-@st.cache_resource
-def iniciar_dropbox():
-    return dropbox.Dropbox(
-        app_key=st.secrets["DROPBOX_APP_KEY"],
-        app_secret=st.secrets["DROPBOX_APP_SECRET"],
-        oauth2_refresh_token=st.secrets["DROPBOX_REFRESH_TOKEN"]
-    )
+# ==========================================
+# MOTOR DE SINCRONIZACIÓN CON CACHÉ TEMPORAL (4 HORAS)
+# ==========================================
+@st.cache_data(ttl=14400, show_spinner=False) # 🔥 Cambiado a 14400 segundos (4 horas)
+def sincronizacion_global_dropbox():
+    dbx_conn = iniciar_dropbox()
+    n_csv = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_CSV, DIR_LOCAL_CSV, ".csv")
+    n_fit = sincronizar_carpeta(dbx_conn, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".csv")
+    return n_csv, n_fit
 
 def sincronizar_carpeta(dbx, ruta_dbx, ruta_local, extension):
     ruta_api = "" if ruta_dbx == "/" else ruta_dbx
