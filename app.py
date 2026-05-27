@@ -331,6 +331,96 @@ if archivos_salud_json:
 
         st.divider()
 
+        # ── Últimos 7 días (tabla diaria coloreada) ───────────────────
+        st.markdown("### 📆 Últimos 7 días")
+        _df7 = df_salud.tail(7).copy()
+        _DIAS_ES_CORTO = {0:'Lun', 1:'Mar', 2:'Mié', 3:'Jue', 4:'Vie', 5:'Sáb', 6:'Dom'}
+        _DIAS_ES_LARGO = {0:'lunes', 1:'martes', 2:'miércoles', 3:'jueves',
+                          4:'viernes', 5:'sábado', 6:'domingo'}
+
+        _col_map_7d = {
+            'hora_dormir':       '🕙 Dormido',
+            'hora_despertar':    '⏰ Despertado',
+            'sueno_total':       '💤 Sueño h',
+            'sueno_profundo':    '🟦 Prof. h',
+            'sueno_rem':         '🟣 REM h',
+            'pasos':             '👣 Pasos',
+            'fc_reposo':         '🫀 FC Rep.',
+            'hrv':               '🔋 HRV ms',
+            'spo2':              '🩸 SpO2 %',
+            'minutos_ejercicio': '⚡ Ejerc. min',
+            'temp_muneca':       '🌡️ Tª Muñ.',
+        }
+        _disp_7d = {k: v for k, v in _col_map_7d.items()
+                    if k in _df7.columns and _df7[k].notna().any()}
+
+        if not _df7.empty and _disp_7d:
+            _tab7 = _df7[list(_disp_7d.keys())].rename(columns=_disp_7d).copy()
+            for _c in _tab7.select_dtypes(include='float').columns:
+                _tab7[_c] = _tab7[_c].round(1)
+            _tab7.index = [
+                f"{_DIAS_ES_CORTO[d.weekday()]} {d.strftime('%d/%m')}"
+                for d in _df7.index
+            ]
+
+            _text_7d   = {'🕙 Dormido', '⏰ Despertado'}
+            _invert_7d = {'🫀 FC Rep.', '🌡️ Tª Muñ.'}
+
+            def _grad7(s, invert=False):
+                vals = pd.to_numeric(s, errors='coerce')
+                mn, mx = vals.dropna().min(), vals.dropna().max()
+                if pd.isna(mn) or mx == mn:
+                    return ['' for _ in s]
+                out = []
+                for v in vals:
+                    if pd.isna(v):
+                        out.append('')
+                        continue
+                    norm = (v - mn) / (mx - mn)
+                    if invert:
+                        norm = 1 - norm
+                    if norm >= 0.66:
+                        out.append('background-color:rgba(0,204,150,.35);color:#ccffee')
+                    elif norm >= 0.33:
+                        out.append('background-color:rgba(255,193,7,.22)')
+                    else:
+                        out.append('background-color:rgba(239,83,80,.35);color:#ffcccc')
+                return out
+
+            _sty7 = _tab7.style.format(na_rep='—')
+            for _ck, _cv in _disp_7d.items():
+                if _cv not in _text_7d:
+                    _sty7 = _sty7.apply(_grad7, invert=(_cv in _invert_7d), subset=[_cv])
+            st.dataframe(_sty7, use_container_width=True)
+
+            # Quick insights
+            _ins7 = []
+            if 'sueno_total' in _df7.columns and _df7['sueno_total'].notna().any():
+                _d_best  = _df7['sueno_total'].idxmax()
+                _d_worst = _df7['sueno_total'].idxmin()
+                _ins7.append(
+                    f"💤 Mejor noche: **{_DIAS_ES_LARGO[_d_best.weekday()]} {_d_best.strftime('%d/%m')}**"
+                    f" ({_df7.loc[_d_best, 'sueno_total']:.1f} h)"
+                    f"  ·  Peor: **{_DIAS_ES_LARGO[_d_worst.weekday()]} {_d_worst.strftime('%d/%m')}**"
+                    f" ({_df7.loc[_d_worst, 'sueno_total']:.1f} h)"
+                )
+            if 'hrv' in _df7.columns and _df7['hrv'].notna().any():
+                _d = _df7['hrv'].idxmax()
+                _ins7.append(
+                    f"🔋 Mayor HRV: **{_DIAS_ES_LARGO[_d.weekday()]} {_d.strftime('%d/%m')}**"
+                    f" ({_df7.loc[_d, 'hrv']:.0f} ms)"
+                )
+            if 'pasos' in _df7.columns and _df7['pasos'].notna().any():
+                _d = _df7['pasos'].idxmax()
+                _ins7.append(
+                    f"👣 Más activo: **{_DIAS_ES_LARGO[_d.weekday()]} {_d.strftime('%d/%m')}**"
+                    f" ({int(_df7.loc[_d, 'pasos']):,} pasos)"
+                )
+            for _i7 in _ins7:
+                st.caption(_i7)
+
+        st.divider()
+
         st.markdown("### 🚶‍♂️ Evolución de Actividad (Pasos Diarios)")
         if 'pasos' in df_salud_filtrado.columns:
             fig_pasos = go.Figure()
@@ -718,15 +808,48 @@ if datos_entrenos:
             )
             return df.sort_values('tiempo')
 
-        # ── Tarjeta por sesión ───────────────────────────────────────────
-        # Filtramos la lista de dicts original para mantener las series temporales
+        # ── Tarjeta por sesión con paginación ────────────────────────────
         fecha_filtro_dt = fecha_filtro.to_pydatetime() if hasattr(fecha_filtro, 'to_pydatetime') else fecha_filtro
         workouts_filtrados = [
             w for w in datos_entrenos
             if w['fecha_inicio'] >= fecha_filtro_dt
         ]
 
-        for _idx, w in enumerate(workouts_filtrados):
+        _PAGE_SIZE = 10
+        _total_w   = len(workouts_filtrados)
+        _total_pag = max(1, math.ceil(_total_w / _PAGE_SIZE))
+        _pag_key   = "pag_entrenos"
+
+        # Resetear a página 1 cuando cambia el filtro de periodo
+        if st.session_state.get("_ultimo_filtro_pag") != opcion_periodo:
+            st.session_state[_pag_key] = 1
+            st.session_state["_ultimo_filtro_pag"] = opcion_periodo
+        _pag_actual = max(1, min(st.session_state.get(_pag_key, 1), _total_pag))
+
+        _offset         = (_pag_actual - 1) * _PAGE_SIZE
+        workouts_pagina = workouts_filtrados[_offset : _offset + _PAGE_SIZE]
+
+        # ── Barra de navegación superior ─────────────────────────────
+        _ini_m = _offset + 1
+        _fin_m = min(_offset + _PAGE_SIZE, _total_w)
+        _nav_l, _nav_c, _nav_r = st.columns([1, 2, 1])
+        with _nav_l:
+            if st.button("← Anterior", key="pag_ant_top", disabled=(_pag_actual <= 1)):
+                st.session_state[_pag_key] = _pag_actual - 1
+                st.rerun()
+        with _nav_c:
+            st.markdown(
+                f"<p style='text-align:center;margin:6px 0'>"
+                f"Sesiones <b>{_ini_m}–{_fin_m}</b> de <b>{_total_w}</b>"
+                f" &nbsp;·&nbsp; Página <b>{_pag_actual}</b> de <b>{_total_pag}</b></p>",
+                unsafe_allow_html=True)
+        with _nav_r:
+            if st.button("Siguiente →", key="pag_sig_top", disabled=(_pag_actual >= _total_pag)):
+                st.session_state[_pag_key] = _pag_actual + 1
+                st.rerun()
+
+        for _idx, w in enumerate(workouts_pagina):
+            _gidx = _offset + _idx   # índice global → keys únicas entre páginas
             deporte_raw   = w['deporte']
             deporte_label = w['nombre_original']
             icono         = _ICONOS.get(deporte_raw, '🏆')
@@ -841,7 +964,7 @@ if datos_entrenos:
                         ))
                         fig_z.update_layout(height=210, margin=dict(l=0, r=30, t=5, b=0),
                                             xaxis_title="Minutos", showlegend=False)
-                        st.plotly_chart(fig_z, width='stretch', key=f"zonas_{_idx}")
+                        st.plotly_chart(fig_z, width='stretch', key=f"zonas_{_gidx}")
                         st.caption("⚠️ Estimación basada en FC media / FC máx. histórica.")
 
                 # ── Series temporales del Apple Watch ────────────────────
@@ -870,7 +993,7 @@ if datos_entrenos:
                             height=260, margin=dict(l=0, r=0, t=40, b=0),
                             xaxis_title="Hora", yaxis_title="lpm",
                             legend=dict(orientation="h", yanchor="bottom", y=1.02))
-                        st.plotly_chart(fig_hr, width='stretch', key=f"hr_ts_{_idx}")
+                        st.plotly_chart(fig_hr, width='stretch', key=f"hr_ts_{_gidx}")
 
                 if ae_data:
                     df_ae = pd.DataFrame(ae_data)
@@ -884,7 +1007,7 @@ if datos_entrenos:
                     fig_ae.update_layout(title="🔥 Energía por minuto (kcal)",
                                          height=200, margin=dict(l=0, r=0, t=40, b=0),
                                          xaxis_title="Hora", yaxis_title="kcal", showlegend=False)
-                    st.plotly_chart(fig_ae, width='stretch', key=f"ae_ts_{_idx}")
+                    st.plotly_chart(fig_ae, width='stretch', key=f"ae_ts_{_gidx}")
 
                 if hrr_data and len(hrr_data) >= 2:
                     hrr_ini  = hrr_data[0]['Avg']
@@ -904,6 +1027,24 @@ if datos_entrenos:
                     else:                nivel_rec = "🔴 Baja"
                     st.caption(f"Bajada de {hrr_drop:.0f} lpm en {minutos_rec:.1f} min → {nivel_rec}")
 
+        # ── Barra de navegación inferior ─────────────────────────────
+        if _total_pag > 1:
+            st.divider()
+            _nav2_l, _nav2_c, _nav2_r = st.columns([1, 2, 1])
+            with _nav2_l:
+                if st.button("← Anterior", key="pag_ant_bot", disabled=(_pag_actual <= 1)):
+                    st.session_state[_pag_key] = _pag_actual - 1
+                    st.rerun()
+            with _nav2_c:
+                st.markdown(
+                    f"<p style='text-align:center;margin:6px 0'>"
+                    f"Página <b>{_pag_actual}</b> de <b>{_total_pag}</b></p>",
+                    unsafe_allow_html=True)
+            with _nav2_r:
+                if st.button("Siguiente →", key="pag_sig_bot", disabled=(_pag_actual >= _total_pag)):
+                    st.session_state[_pag_key] = _pag_actual + 1
+                    st.rerun()
+
 else:
     st.info("⚠️ No se han encontrado datos de entrenamiento. Comprueba que Health Auto Export exporta a la carpeta 'Actividades'.")
 
@@ -921,14 +1062,14 @@ if st.button("✨ Generar Análisis Completo de mi Estado"):
 
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 
-            p_pasos = f"{media_pasos:,.0f}"      if 'media_pasos' in locals() else "Sin datos"
-            p_hrv   = f"{hrv_medio:.0f} ms"      if 'hrv_medio'   in locals() else "Sin datos"
-            p_sueno = f"{sueno_medio:.1f} h"      if 'sueno_medio' in locals() else "Sin datos"
+            p_pasos = f"{media_pasos:,.0f}"       if 'media_pasos'    in locals() else "Sin datos"
+            p_hrv   = f"{hrv_medio:.0f} ms"       if 'hrv_medio'      in locals() else "Sin datos"
+            p_sueno = f"{sueno_medio:.1f} h"       if 'sueno_medio'    in locals() else "Sin datos"
             p_fc    = f"{fc_media_global:.0f} lpm" if 'fc_media_global' in locals() else "Sin datos"
 
-            p_atl   = f"{atl_actual:.0f}"         if 'atl_actual'   in locals() else "0"
-            p_ctl   = f"{ctl_actual:.0f}"         if 'ctl_actual'   in locals() else "0"
-            p_ratio = f"{ratio_carga:.2f}"        if 'ratio_carga'  in locals() else "0"
+            p_atl   = f"{atl_actual:.0f}"          if 'atl_actual'   in locals() else "0"
+            p_ctl   = f"{ctl_actual:.0f}"          if 'ctl_actual'   in locals() else "0"
+            p_ratio = f"{ratio_carga:.2f}"         if 'ratio_carga'  in locals() else "0"
 
             prompt = (
                 "Actua como un medico deportivo y entrenador personal de elite.\n"
