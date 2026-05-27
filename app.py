@@ -5,25 +5,27 @@ import pandas as pd
 import dropbox
 import os
 import glob
+import json
 import threading
 import time
 import math
-from datetime import datetime
-from procesar_datos import analizar_salud_csv
+from datetime import datetime, timezone
+from procesar_salud_json import analizar_salud_json
+from procesar_actividades_json import cargar_actividades
 
 st.set_page_config(page_title="Mi Dashboard de Salud V3.1", layout="wide")
 
 # ==========================================
 # CONFIGURACIÓN DE DROPBOX Y RUTAS LOCALES
 # ==========================================
-CARPETA_DROPBOX_CSV = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthExport"
-CARPETA_DROPBOX_FIT = "/Aplicaciones/HealthFitExporter"
+CARPETA_DROPBOX_SALUD_JSON  = "/Aplicaciones/Health Auto Export/Health Auto Export/AppleHealthJson"
+CARPETA_DROPBOX_ACTIVIDADES = "/Aplicaciones/Health Auto Export/Health Auto Export/Actividades"
 
-DIR_LOCAL_CSV = "datos_locales/csv"
-DIR_LOCAL_FIT = "datos_locales/fit"
+DIR_LOCAL_SALUD_JSON  = "datos_locales/salud_json"
+DIR_LOCAL_ACTIVIDADES = "datos_locales/actividades"
 
-os.makedirs(DIR_LOCAL_CSV, exist_ok=True)
-os.makedirs(DIR_LOCAL_FIT, exist_ok=True)
+os.makedirs(DIR_LOCAL_SALUD_JSON,  exist_ok=True)
+os.makedirs(DIR_LOCAL_ACTIVIDADES, exist_ok=True)
 
 # TTL de sincronización: 4 horas en segundos
 _SYNC_TTL = 14400
@@ -91,9 +93,8 @@ def _hilo_sync(estado):
     nuevos = 0
     try:
         dbx = _crear_cliente_dropbox()
-        nuevos += _sincronizar_carpeta_noblocking(dbx, CARPETA_DROPBOX_CSV, DIR_LOCAL_CSV, ".csv", errores)
-        nuevos += _sincronizar_carpeta_noblocking(dbx, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".csv", errores)
-        nuevos += _sincronizar_carpeta_noblocking(dbx, CARPETA_DROPBOX_FIT, DIR_LOCAL_FIT, ".fit", errores)
+        nuevos += _sincronizar_carpeta_noblocking(dbx, CARPETA_DROPBOX_SALUD_JSON,  DIR_LOCAL_SALUD_JSON,  ".json", errores)
+        nuevos += _sincronizar_carpeta_noblocking(dbx, CARPETA_DROPBOX_ACTIVIDADES, DIR_LOCAL_ACTIVIDADES, ".json", errores)
     except Exception as e:
         errores.append(f"Error crítico al conectar con Dropbox: {e}")
     finally:
@@ -106,43 +107,54 @@ def _hilo_sync(estado):
 
 @st.cache_data(show_spinner=False)
 def cargar_datos_locales():
-    rutas_csv = sorted(glob.glob(os.path.join(DIR_LOCAL_CSV, "*.csv")))
-    ruta_historico = os.path.join(DIR_LOCAL_FIT, "historico_entrenamientos.csv")
-    entrenos_data = []
-    if os.path.exists(ruta_historico):
-        try:
-            df_historico = pd.read_csv(ruta_historico)
-            entrenos_data = df_historico.to_dict("records")
-        except Exception:
-            pass
-    return rutas_csv, entrenos_data
+    rutas_json = sorted(glob.glob(os.path.join(DIR_LOCAL_SALUD_JSON, "Salud-*.json")))
+    workouts   = cargar_actividades(DIR_LOCAL_ACTIVIDADES)
+    return rutas_json, workouts
 
 
 @st.cache_data(show_spinner=False)
 def cargar_y_analizar_salud(rutas_tuple):
+    """
+    Carga los JSONs de salud, normaliza nombres de columnas al estilo
+    que usa el resto de app.py y añade medias móviles de 7 días (_tendencia).
+    """
     try:
-        return analizar_salud_csv(list(rutas_tuple))
+        df = analizar_salud_json(list(rutas_tuple))
+        if df.empty:
+            return df
+
+        # ── Establecer fecha como índice ──────────────────────────────────
+        df = df.set_index('fecha')
+        df.index = pd.to_datetime(df.index)
+
+        # ── Renombrar columnas para compatibilidad con el resto de app.py ─
+        rename_map = {
+            'hrv_ms':           'hrv',
+            'spo2_pct':         'spo2',
+            'sueno_total_h':    'sueno_total',
+            'sueno_profundo_h': 'sueno_profundo',
+            'sueno_rem_h':      'sueno_rem',
+            'sueno_core_h':     'sueno_core',
+            'sueno_despierto_h':'sueno_despierto',
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        # ── Medias móviles 7 días (tendencias) ───────────────────────────
+        cols_tendencia = [
+            'pasos', 'fc_media', 'fc_reposo', 'hrv', 'sueno_total',
+            'sueno_profundo', 'sueno_rem', 'vo2max',
+            'calorias_totales_kcal', 'minutos_ejercicio',
+            'spo2', 'temp_muneca', 'freq_respiratoria',
+        ]
+        for col in cols_tendencia:
+            if col in df.columns:
+                df[f'{col}_tendencia'] = df[col].rolling(window=7, min_periods=2).mean()
+
+        return df
     except Exception:
         return pd.DataFrame()
 
 
-@st.cache_data(show_spinner=False)
-def _leer_fit_gps(fit_path):
-    """Extrae track GPS de un .fit. Devuelve DataFrame con lat/lon o vacío."""
-    try:
-        import fitparse
-        fitfile = fitparse.FitFile(fit_path)
-        coords = []
-        for record in fitfile.get_messages('record'):
-            d = {f.name: f.value for f in record}
-            if d.get('position_lat') and d.get('position_long'):
-                coords.append({
-                    'lat': d['position_lat']  * (180 / 2**31),
-                    'lon': d['position_long'] * (180 / 2**31),
-                })
-        return pd.DataFrame(coords)
-    except Exception:
-        return pd.DataFrame()
 
 
 # ==========================================
@@ -202,15 +214,15 @@ with st.sidebar:
     st.caption("Datos: Apple Health + Apple Watch Ultra 2")
 
 with st.spinner("Cargando datos históricos... 🚀"):
-    archivos_csv_locales, datos_entrenos = cargar_datos_locales()
+    archivos_salud_json, datos_entrenos = cargar_datos_locales()
 
 # ==========================================
 # SECCIÓN 1: SALUD, RECUPERACIÓN Y SUEÑO
 # ==========================================
 st.header("📊 Análisis de Salud General")
 
-if archivos_csv_locales:
-    df_salud = cargar_y_analizar_salud(tuple(archivos_csv_locales))
+if archivos_salud_json:
+    df_salud = cargar_y_analizar_salud(tuple(archivos_salud_json))
 
     if not df_salud.empty:
         st.markdown("### 📅 Filtro de Periodo")
@@ -270,29 +282,52 @@ if archivos_csv_locales:
         dif_hrv = f"{hrv_medio - hrv_pasado:.0f} ms" if hrv_pasado > 0 else None
         c3.metric("🔋 HRV Medio", f"{hrv_medio:.0f} ms", dif_hrv)
 
-        dif_spo2 = f"{(spo2_medio - spo2_pasado) * 100 if spo2_medio < 1 else (spo2_medio - spo2_pasado):.1f} %" if spo2_pasado > 0 else None
-        c4.metric("🩸 SpO2 Promedio", f"{spo2_medio * 100 if spo2_medio < 1 else spo2_medio:.1f} %", dif_spo2)
+        dif_spo2 = f"{spo2_medio - spo2_pasado:.1f} %" if spo2_pasado > 0 else None
+        c4.metric("🩸 SpO2 Promedio", f"{spo2_medio:.1f} %", dif_spo2)
 
         dif_sueno = f"{sueno_medio - sueno_pasado:.1f} h" if sueno_pasado > 0 else None
         c5.metric("💤 Sueño / día", f"{sueno_medio:.1f} h", dif_sueno)
+
+        # Métricas nuevas disponibles solo en JSON
+        luz_solar_media    = _mean('luz_solar_min')
+        tiempo_pie_medio   = _mean('tiempo_de_pie_min')
+        temp_muneca_media  = _mean('temp_muneca')
+        alt_resp_media     = _mean('alteraciones_respiracion')
 
         metricas_forma = []
         if fc_reposo_medio > 0:
             dif_fcr = f"{fc_reposo_medio - fc_reposo_pasado:.0f} lpm" if fc_reposo_pasado > 0 else None
             metricas_forma.append(("🫀 FC en Reposo", f"{fc_reposo_medio:.0f} lpm", dif_fcr, "inverse"))
         if vo2max_actual > 0:
-            metricas_forma.append(("🫁 VO2Max (est.)", f"{vo2max_actual:.1f} ml/kg/min", None, "normal"))
+            metricas_forma.append(("🫁 VO2Max", f"{vo2max_actual:.1f} ml/kg/min", None, "normal"))
         if calorias_medio > 0:
             dif_cal = f"{calorias_medio - calorias_pasado:,.0f} kcal" if calorias_pasado > 0 else None
             metricas_forma.append(("🔥 Calorías totales", f"{calorias_medio:,.0f} kcal/día", dif_cal, "normal"))
         if min_ejercicio > 0:
             dif_mej = f"{min_ejercicio - min_ej_pasado:.0f} min" if min_ej_pasado > 0 else None
             metricas_forma.append(("⚡ Min. ejercicio", f"{min_ejercicio:.0f} min/día", dif_mej, "normal"))
+        if luz_solar_media > 0:
+            metricas_forma.append(("☀️ Luz solar", f"{luz_solar_media:.0f} min/día", None, "normal"))
+        if tiempo_pie_medio > 0:
+            metricas_forma.append(("🧍 Tiempo de pie", f"{tiempo_pie_medio/60:.1f} h/día", None, "normal"))
 
         if metricas_forma:
-            cols_forma = st.columns(len(metricas_forma))
-            for col, (label, val, delta, delta_color) in zip(cols_forma, metricas_forma):
-                col.metric(label, val, delta, delta_color=delta_color)
+            cols_forma = st.columns(min(len(metricas_forma), 4))
+            for i, (label, val, delta, delta_color) in enumerate(metricas_forma):
+                cols_forma[i % 4].metric(label, val, delta, delta_color=delta_color)
+
+        # ── Métricas de temperatura y alteraciones respiratorias ─────────
+        if temp_muneca_media or alt_resp_media:
+            st.markdown("##### 🌡️ Datos nocturnos")
+            ct1, ct2 = st.columns(2)
+            if temp_muneca_media:
+                ct1.metric("🌡️ Temp. muñeca (dormir)",
+                           f"{temp_muneca_media:.2f} °C",
+                           help="Desviación respecto a la temperatura basal. >0.5°C puede indicar enfermedad o estrés")
+            if alt_resp_media:
+                ct2.metric("😮‍💨 Alteraciones resp. / noche",
+                           f"{alt_resp_media:.0f}",
+                           help="Número de alteraciones respiratorias detectadas durante el sueño")
 
         st.divider()
 
@@ -349,14 +384,30 @@ if archivos_csv_locales:
         with tab2:
             if all(col in df_salud_filtrado.columns for col in ['sueno_total', 'sueno_profundo', 'sueno_rem']):
                 fig_sueno = go.Figure()
-                df_salud_filtrado['sueno_ligero'] = (df_salud_filtrado['sueno_total']
-                                                     - df_salud_filtrado['sueno_profundo']
-                                                     - df_salud_filtrado['sueno_rem']).clip(lower=0)
-                fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_profundo'], name='Profundo', marker_color='#1f77b4'))
-                fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_rem'], name='REM', marker_color='#9467bd'))
-                fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_ligero'], name='Ligero', marker_color='#aec7e8'))
+                # Con JSON tenemos sueno_core (sueño ligero real) y sueno_despierto
+                if 'sueno_core' in df_salud_filtrado.columns:
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_profundo'], name='Profundo', marker_color='#1f77b4'))
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_rem'], name='REM', marker_color='#9467bd'))
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_core'], name='Ligero (Core)', marker_color='#aec7e8'))
+                    if 'sueno_despierto' in df_salud_filtrado.columns:
+                        fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_despierto'], name='Despierto', marker_color='#ffbb78'))
+                else:
+                    df_salud_filtrado['sueno_ligero'] = (df_salud_filtrado['sueno_total']
+                                                         - df_salud_filtrado['sueno_profundo']
+                                                         - df_salud_filtrado['sueno_rem']).clip(lower=0)
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_profundo'], name='Profundo', marker_color='#1f77b4'))
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_rem'], name='REM', marker_color='#9467bd'))
+                    fig_sueno.add_trace(go.Bar(x=df_salud_filtrado.index, y=df_salud_filtrado['sueno_ligero'], name='Ligero', marker_color='#aec7e8'))
                 fig_sueno.update_layout(barmode='stack', title="Fases del Sueño por Noches", yaxis_title="Horas")
                 st.plotly_chart(fig_sueno, width='stretch')
+
+                # Métricas de sueño detalladas
+                s_cols = st.columns(4)
+                s_cols[0].metric("💤 Total medio",    f"{_mean('sueno_total'):.1f} h")
+                s_cols[1].metric("🟦 Profundo medio", f"{_mean('sueno_profundo'):.2f} h")
+                s_cols[2].metric("🟣 REM medio",      f"{_mean('sueno_rem'):.2f} h")
+                if 'sueno_core' in df_salud_filtrado.columns:
+                    s_cols[3].metric("🩵 Ligero medio", f"{_mean('sueno_core'):.2f} h")
 
         with tab3:
             col_pasos, col_ejercicio = st.columns([2, 1])
@@ -437,24 +488,28 @@ if archivos_csv_locales:
                 fig_temp.update_layout(yaxis_title="Desviación (°C)", margin=dict(l=0, r=0, t=20, b=0))
                 st.plotly_chart(fig_temp, width='stretch')
 else:
-    st.warning("⚠️ No se han encontrado archivos CSV locales.")
+    st.warning("⚠️ No se han encontrado ficheros Salud-*.json. Comprueba que Health Auto Export exporta a la carpeta 'AppleHealthJson'.")
 
 st.divider()
 
 # ==========================================
-# SECCIÓN 2: ENTRENAMIENTOS (.FIT)
+# SECCIÓN 2: ENTRENAMIENTOS (JSON)
 # ==========================================
 st.header("🚴‍♂️ Rendimiento y Carga de Entrenamiento")
 
 if datos_entrenos:
-    df_entrenos = pd.DataFrame(datos_entrenos)
+    # datos_entrenos es la lista de dicts de cargar_actividades()
+    df_entrenos = pd.DataFrame([
+        {k: v for k, v in w.items() if not isinstance(v, list)}
+        for w in datos_entrenos
+    ])
     df_entrenos['distancia_km']  = pd.to_numeric(df_entrenos['distancia_km'],  errors='coerce').fillna(0)
     df_entrenos['duracion_min']  = pd.to_numeric(df_entrenos['duracion_min'],  errors='coerce').fillna(0)
     df_entrenos['carga_entreno'] = pd.to_numeric(df_entrenos['carga_entreno'], errors='coerce').fillna(0)
+    df_entrenos['fecha_inicio']  = pd.to_datetime(df_entrenos['fecha_inicio'],  errors='coerce')
+    df_entrenos = df_entrenos.dropna(subset=['fecha_inicio']).sort_values('fecha_inicio')
 
-    if 'fecha_inicio' in df_entrenos.columns:
-        df_entrenos['fecha_inicio'] = pd.to_datetime(df_entrenos['fecha_inicio'], errors='coerce')
-        df_entrenos = df_entrenos.dropna(subset=['fecha_inicio']).sort_values('fecha_inicio')
+    if True:
 
         fecha_maxima = df_entrenos['fecha_inicio'].max()
 
@@ -509,12 +564,12 @@ if datos_entrenos:
 
         st.divider()
 
-        # --- EVOLUCIÓN DE EFICIENCIA AERÓBICA ---
-        st.markdown("### 📈 Evolución del Índice de Eficiencia Aeróbica")
+        # --- EVOLUCIÓN DE VELOCIDAD MEDIA EN RUNNING ---
         df_running = df_entrenos[df_entrenos['deporte'] == 'running'].copy()
-        if not df_running.empty and 'eficiencia_aerobica' in df_running.columns:
-            fig_ef = px.scatter(df_running, x='fecha_inicio', y='eficiencia_aerobica', trendline="lowess",
-                                title="Eficiencia en Carrera (Metros por minuto / Latido) — ¡Hacia arriba es mejor!",
+        if not df_running.empty and 'velocidad_kmh' in df_running.columns and df_running['velocidad_kmh'].gt(0).any():
+            st.markdown("### 📈 Evolución de la Velocidad Media en Carrera")
+            fig_ef = px.scatter(df_running, x='fecha_inicio', y='velocidad_kmh', trendline="lowess",
+                                title="Velocidad media (km/h) — ¡Hacia arriba es mejor!",
                                 color_discrete_sequence=['#deff9a'])
             st.plotly_chart(fig_ef, width='stretch')
 
@@ -607,13 +662,11 @@ if datos_entrenos:
         _COLORES_DEPORTE = {
             'running': '#00CC96', 'cycling': '#636EFA', 'swimming': '#19D3F3',
             'hiking': '#FFA15A', 'strength_training': '#EF553B',
+            'cross_training': '#FF6B6B', 'functional_strength_training': '#FF6B6B',
             'yoga': '#AB63FA', 'trail_running': '#FF7F0E', 'walking': '#B6B6B6',
         }
-        max_trimp = df_filtrado['carga_entreno'].max() if not df_filtrado.empty else 1
-
-        # FC máxima histórica para calcular zonas
-        hrmax_hist = (df_entrenos['fc_max'].replace(0, pd.NA).dropna().max()
-                      if 'fc_max' in df_entrenos.columns else 190)
+        max_trimp  = df_filtrado['carga_entreno'].max() if not df_filtrado.empty else 1
+        hrmax_hist = df_entrenos['fc_max'].replace(0, pd.NA).dropna().max()
         if pd.isna(hrmax_hist) or hrmax_hist <= 0:
             hrmax_hist = 190
 
@@ -638,7 +691,7 @@ if datos_entrenos:
             pct  = fc_media / hmax
             sig  = 0.06
             zonas = [
-                ('Z1 · Recuperación', 0.00, 0.60, '#4CAF50'),
+                ('Z1 · Recuperación',  0.00, 0.60, '#4CAF50'),
                 ('Z2 · Base aeróbica', 0.60, 0.70, '#8BC34A'),
                 ('Z3 · Tempo',         0.70, 0.80, '#FFC107'),
                 ('Z4 · Umbral',        0.80, 0.90, '#FF5722'),
@@ -654,49 +707,57 @@ if datos_entrenos:
             if carga < 200: return "🟠 Sobrecarga VO₂Max"
             return              "🔴 Entrenamiento Extremo"
 
-        def _buscar_fit(fecha_dt, dir_fit):
-            fits = glob.glob(os.path.join(dir_fit, "*.fit"))
-            if not fits or pd.isna(fecha_dt):
-                return None
-            ts = fecha_dt.timestamp()
-            candidatos = sorted((abs(os.path.getmtime(f) - ts), f) for f in fits)
-            diff, mejor = candidatos[0]
-            return mejor if diff < 43200 else None   # ±12 horas
+        def _parse_hr_series(series_list):
+            """Convierte lista de dicts con 'date' al formato que usa Plotly."""
+            if not series_list:
+                return pd.DataFrame()
+            df = pd.DataFrame(series_list)
+            df['tiempo'] = pd.to_datetime(
+                df['date'].str.replace(r'\s[+-]\d{4}$', '', regex=True),
+                format='%Y-%m-%d %H:%M:%S', utc=False
+            )
+            return df.sort_values('tiempo')
 
         # ── Tarjeta por sesión ───────────────────────────────────────────
-        for _idx, entreno in df_filtrado.reset_index(drop=True).iterrows():
-            deporte_raw   = str(entreno.get('deporte', 'otro')).lower()
-            deporte_label = deporte_raw.replace('_', ' ').title()
+        # Filtramos la lista de dicts original para mantener las series temporales
+        fecha_filtro_dt = fecha_filtro.to_pydatetime() if hasattr(fecha_filtro, 'to_pydatetime') else fecha_filtro
+        workouts_filtrados = [
+            w for w in datos_entrenos
+            if w['fecha_inicio'] >= fecha_filtro_dt
+        ]
+
+        for _idx, w in enumerate(workouts_filtrados):
+            deporte_raw   = w['deporte']
+            deporte_label = w['nombre_original']
             icono         = _ICONOS.get(deporte_raw, '🏆')
             color         = _COLORES_DEPORTE.get(deporte_raw, '#888888')
-            distancia     = float(entreno.get('distancia_km',      0) or 0)
-            duracion      = float(entreno.get('duracion_min',       0) or 0)
-            carga         = float(entreno.get('carga_entreno',      0) or 0)
-            fc_media_e    = int(  entreno.get('fc_media',           0) or 0)
-            fc_max_e      = int(  entreno.get('fc_max',             0) or 0)
-            ritmo         = str(  entreno.get('ritmo',              ''))
-            desnivel      = str(  entreno.get('desnivel_positivo',  ''))
-            calorias_e    = int(  entreno.get('calorias_kcal',      0) or 0)
-            ef_e          = float(entreno.get('eficiencia_aerobica', 0) or 0)
-            cadencia_e    = int(  entreno.get('cadencia_media',     0) or 0)
-            potencia_e    = int(  entreno.get('potencia_media',     0) or 0)
-            temp_e        = float(entreno.get('temperatura',        0) or 0)
-            fecha_dt      = entreno['fecha_inicio'] if pd.notnull(entreno['fecha_inicio']) else None
-            fecha_str     = fecha_dt.strftime('%d %b %Y') if fecha_dt else ""
-            dia_semana    = fecha_dt.strftime('%A')        if fecha_dt else ""
+            distancia     = w['distancia_km']
+            duracion      = w['duracion_min']
+            carga         = w['carga_entreno']
+            fc_media_e    = int(w['fc_media'])
+            fc_max_e      = int(w['fc_max'])
+            ritmo         = w['ritmo']
+            desnivel      = w['desnivel_positivo']
+            calorias_e    = w['calorias_kcal']
+            cadencia_e    = int(w['cadencia_media'])
+            temp_e        = w['temperatura']
+            humedad_e     = w['humedad']
+            velocidad     = w['velocidad_kmh']
+            fecha_dt      = w['fecha_inicio']
+            fecha_str     = fecha_dt.strftime('%d %b %Y')
+            dia_semana    = fecha_dt.strftime('%A')
             intensidad    = min(carga / max_trimp, 1.0) if max_trimp > 0 else 0
-            velocidad     = round(distancia / (duracion / 60), 1) if distancia > 0 and duracion > 0 else 0
 
-            # Etiqueta del expander (texto compacto)
+            # Etiqueta del expander
             partes_lbl = [f"{icono} {deporte_label}"]
             if distancia > 0: partes_lbl.append(f"{distancia:.2f} km")
             if duracion  > 0: partes_lbl.append(f"{int(duracion)} min")
-            if ritmo and ritmo not in ('', '0:00', '-'): partes_lbl.append(f"{ritmo}/km")
+            if ritmo:         partes_lbl.append(f"{ritmo}/km")
             label_exp = f"{fecha_str}   ·   " + "  ·  ".join(partes_lbl)
 
             with st.expander(label_exp, expanded=False):
 
-                # ── Resumen visual (cabecera de la tarjeta) ──────────────
+                # ── Cabecera ────────────────────────────────────────────
                 with st.container(border=True):
                     col_ico, col_info, col_stats = st.columns([0.07, 0.45, 0.48])
                     with col_ico:
@@ -709,10 +770,10 @@ if datos_entrenos:
                             f"<span style='color:{color};font-weight:700'>{deporte_label}</span>",
                             unsafe_allow_html=True)
                         partes_inf = []
-                        if distancia > 0: partes_inf.append(f"📍 **{distancia:.2f} km**")
-                        if duracion  > 0: partes_inf.append(f"⏱ **{int(duracion)} min**")
-                        if ritmo and ritmo not in ('', '0:00', '-'): partes_inf.append(f"🏁 **{ritmo}/km**")
-                        if desnivel and desnivel not in ('', '0 m', '0m'): partes_inf.append(f"⛰️ {desnivel}")
+                        if distancia > 0:  partes_inf.append(f"📍 **{distancia:.2f} km**")
+                        if duracion  > 0:  partes_inf.append(f"⏱ **{int(duracion)} min**")
+                        if ritmo:          partes_inf.append(f"🏁 **{ritmo}/km**")
+                        if desnivel > 0:   partes_inf.append(f"⛰️ **{desnivel:.0f} m**")
                         if partes_inf:
                             st.markdown(" &nbsp;·&nbsp; ".join(partes_inf), unsafe_allow_html=True)
                         if carga > 0:
@@ -723,7 +784,7 @@ if datos_entrenos:
                         if fc_media_e > 0: s1.metric("❤️ FC med",  f"{fc_media_e}")
                         if fc_max_e   > 0: s2.metric("🔺 FC máx",  f"{fc_max_e}")
                         if calorias_e > 0: s3.metric("🔥 Kcal",    f"{calorias_e}")
-                        if ef_e       > 0: s4.metric("⚡ Ef.",      f"{ef_e:.2f}")
+                        if carga      > 0: s4.metric("🎯 TRIMP",   f"{carga:.0f}")
 
                 # ── Detalle expandido ────────────────────────────────────
                 st.markdown("---")
@@ -732,21 +793,21 @@ if datos_entrenos:
                 with col_metr:
                     st.markdown("##### 📊 Métricas completas")
                     filas_m = []
-                    if velocidad   > 0:                         filas_m.append(("🚀 Velocidad media",       f"{velocidad} km/h"))
-                    if ritmo and ritmo not in ('', '0:00', '-'): filas_m.append(("🏁 Ritmo medio",           f"{ritmo} /km"))
-                    if desnivel and desnivel not in ('', '0 m', '0m'): filas_m.append(("⛰️ Desnivel positivo", desnivel))
-                    if fc_media_e  > 0:                         filas_m.append(("❤️ FC media",              f"{fc_media_e} lpm"))
-                    if fc_max_e    > 0:                         filas_m.append(("🔺 FC máxima",             f"{fc_max_e} lpm"))
+                    if velocidad   > 0:  filas_m.append(("🚀 Velocidad media",    f"{velocidad:.1f} km/h"))
+                    if ritmo:            filas_m.append(("🏁 Ritmo medio",         f"{ritmo} /km"))
+                    if desnivel    > 0:  filas_m.append(("⛰️ Desnivel positivo",  f"{desnivel:.0f} m"))
+                    if fc_media_e  > 0:  filas_m.append(("❤️ FC media",           f"{fc_media_e} lpm"))
+                    if fc_max_e    > 0:  filas_m.append(("🔺 FC máxima",          f"{fc_max_e} lpm"))
                     if fc_media_e  > 0:
                         pct_fc = round(fc_media_e / hrmax_hist * 100, 1)
-                        filas_m.append(("💓 % FC máx histórica", f"{pct_fc} %"))
-                    if calorias_e  > 0:                         filas_m.append(("🔥 Calorías",              f"{calorias_e} kcal"))
-                    if cadencia_e  > 0:                         filas_m.append(("🦵 Cadencia media",        f"{cadencia_e} rpm/spm"))
-                    if potencia_e  > 0:                         filas_m.append(("⚡ Potencia media",        f"{potencia_e} W"))
-                    if temp_e      != 0:                        filas_m.append(("🌡️ Temperatura",           f"{temp_e:.1f} °C"))
-                    if carga       > 0:                         filas_m.append(("🎯 Carga TRIMP",           f"{carga:.0f} pts"))
+                        filas_m.append(("💓 % FC máx hist.",   f"{pct_fc} %"))
+                    if calorias_e  > 0:  filas_m.append(("🔥 Calorías",           f"{calorias_e} kcal"))
+                    if cadencia_e  > 0:  filas_m.append(("🦵 Cadencia",           f"{cadencia_e:.0f} spm"))
+                    if temp_e      > 0:  filas_m.append(("🌡️ Temperatura",        f"{temp_e:.1f} °C"))
+                    if humedad_e   > 0:  filas_m.append(("💧 Humedad",            f"{humedad_e:.0f} %"))
+                    if carga       > 0:  filas_m.append(("🎯 Carga TRIMP",        f"{carga:.0f} pts"))
                     if carga > 0 and duracion > 0:
-                        filas_m.append(("📈 Intensidad TRIMP/min", f"{carga/duracion:.2f}"))
+                        filas_m.append(("📈 Intensidad /min",  f"{carga/duracion:.2f}"))
 
                     for lbl_m, val_m in filas_m:
                         ca, cb = st.columns([3, 2])
@@ -766,45 +827,85 @@ if datos_entrenos:
                         if pm < float('inf') and abs(pace_s - pm) < 0.05:
                             badges.append("⚡ Récord de ritmo")
                     if badges:
-                        st.markdown("")
                         st.success("  ·  ".join(badges))
 
                 with col_zonas:
+                    # FC estimada por zonas
                     zonas = _estimar_zonas(fc_media_e, fc_max_e, duracion, hrmax_hist)
                     if zonas:
                         st.markdown("##### ❤️ Zonas de FC estimadas")
                         fig_z = go.Figure(go.Bar(
-                            x=[z[1] for z in zonas],
-                            y=[z[0] for z in zonas],
-                            orientation='h',
-                            marker_color=[z[2] for z in zonas],
-                            text=[f"{z[1]:.0f} min" for z in zonas],
-                            textposition='auto',
+                            x=[z[1] for z in zonas], y=[z[0] for z in zonas],
+                            orientation='h', marker_color=[z[2] for z in zonas],
+                            text=[f"{z[1]:.0f} min" for z in zonas], textposition='auto',
                         ))
-                        fig_z.update_layout(
-                            height=210,
-                            margin=dict(l=0, r=30, t=5, b=0),
-                            xaxis_title="Minutos",
-                            showlegend=False,
-                        )
+                        fig_z.update_layout(height=210, margin=dict(l=0, r=30, t=5, b=0),
+                                            xaxis_title="Minutos", showlegend=False)
                         st.plotly_chart(fig_z, width='stretch', key=f"zonas_{_idx}")
-                        st.caption("⚠️ Estimación basada en FC media / FC máxima histórica.")
+                        st.caption("⚠️ Estimación basada en FC media / FC máx. histórica.")
 
-                    # Mapa GPS desde archivo .fit
-                    fit_path = _buscar_fit(fecha_dt, DIR_LOCAL_FIT)
-                    if fit_path:
-                        df_gps = _leer_fit_gps(fit_path)
-                        if not df_gps.empty:
-                            st.markdown("##### 🗺️ Ruta GPS")
-                            fig_map = px.line_mapbox(
-                                df_gps, lat='lat', lon='lon',
-                                mapbox_style="open-street-map",
-                                zoom=12, height=300,
-                            )
-                            fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-                            st.plotly_chart(fig_map, width='stretch', key=f"mapa_{_idx}")
+                # ── Series temporales del Apple Watch ────────────────────
+                hr_data  = w.get('heartRateData', [])
+                ae_data  = w.get('activeEnergy', [])
+                hrr_data = w.get('heartRateRecovery', [])
+
+                if hr_data:
+                    df_hr = _parse_hr_series(hr_data)
+                    if not df_hr.empty and 'Avg' in df_hr.columns:
+                        fig_hr = go.Figure()
+                        fig_hr.add_trace(go.Scatter(x=df_hr['tiempo'], y=df_hr['Avg'],
+                            name='FC media', mode='lines',
+                            line=dict(color='#EF5350', width=2),
+                            fill='tozeroy', fillcolor='rgba(239,83,80,0.1)'))
+                        if 'Max' in df_hr.columns:
+                            fig_hr.add_trace(go.Scatter(x=df_hr['tiempo'], y=df_hr['Max'],
+                                name='FC máx', mode='lines',
+                                line=dict(color='#FF8A65', width=1, dash='dot')))
+                        if 'Min' in df_hr.columns:
+                            fig_hr.add_trace(go.Scatter(x=df_hr['tiempo'], y=df_hr['Min'],
+                                name='FC mín', mode='lines',
+                                line=dict(color='#81C784', width=1, dash='dot')))
+                        fig_hr.update_layout(
+                            title="❤️ FC durante el entrenamiento",
+                            height=260, margin=dict(l=0, r=0, t=40, b=0),
+                            xaxis_title="Hora", yaxis_title="lpm",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                        st.plotly_chart(fig_hr, width='stretch', key=f"hr_ts_{_idx}")
+
+                if ae_data:
+                    df_ae = pd.DataFrame(ae_data)
+                    df_ae['tiempo'] = pd.to_datetime(
+                        df_ae['date'].str.replace(r'\s[+-]\d{4}$', '', regex=True),
+                        format='%Y-%m-%d %H:%M:%S', utc=False)
+                    df_ae = df_ae.sort_values('tiempo')
+                    df_ae['kcal'] = df_ae['qty'] / 4.184
+                    fig_ae = go.Figure(go.Bar(x=df_ae['tiempo'], y=df_ae['kcal'],
+                                             marker_color='#FF8A65'))
+                    fig_ae.update_layout(title="🔥 Energía por minuto (kcal)",
+                                         height=200, margin=dict(l=0, r=0, t=40, b=0),
+                                         xaxis_title="Hora", yaxis_title="kcal", showlegend=False)
+                    st.plotly_chart(fig_ae, width='stretch', key=f"ae_ts_{_idx}")
+
+                if hrr_data and len(hrr_data) >= 2:
+                    hrr_ini  = hrr_data[0]['Avg']
+                    hrr_fin  = hrr_data[-1]['Avg']
+                    hrr_drop = hrr_ini - hrr_fin
+                    t_ini = pd.to_datetime(hrr_data[0]['date'].replace('+0200','').replace('+0100','').strip())
+                    t_fin = pd.to_datetime(hrr_data[-1]['date'].replace('+0200','').replace('+0100','').strip())
+                    minutos_rec = max(round((t_fin - t_ini).total_seconds() / 60, 1), 0.1)
+                    st.markdown("##### 💓 Recuperación cardíaca post-esfuerzo")
+                    rc1, rc2, rc3 = st.columns(3)
+                    rc1.metric("FC al parar",          f"{hrr_ini:.0f} lpm")
+                    rc2.metric("FC tras recuperación",  f"{hrr_fin:.0f} lpm", delta=f"-{hrr_drop:.0f} lpm")
+                    rc3.metric("Tiempo medido",         f"{minutos_rec:.1f} min")
+                    if hrr_drop >= 30:   nivel_rec = "🟢 Excelente"
+                    elif hrr_drop >= 20: nivel_rec = "🟡 Buena"
+                    elif hrr_drop >= 12: nivel_rec = "🟠 Moderada"
+                    else:                nivel_rec = "🔴 Baja"
+                    st.caption(f"Bajada de {hrr_drop:.0f} lpm en {minutos_rec:.1f} min → {nivel_rec}")
+
 else:
-    st.info("⚠️ Aún no se ha sincronizado el archivo de histórico de entrenamientos.")
+    st.info("⚠️ No se han encontrado datos de entrenamiento. Comprueba que Health Auto Export exporta a la carpeta 'Actividades'.")
 
 # ==========================================
 # SECCIÓN 3: ENTRENADOR VIRTUAL IA (GEMINI)
