@@ -1,6 +1,7 @@
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
 import dropbox
 import os
@@ -228,12 +229,14 @@ if archivos_salud_json:
         st.markdown("### 📅 Filtro de Periodo")
         opcion_periodo_salud = st.radio(
             "Selecciona el periodo a analizar:",
-            ["Últimos 30 días", "Últimos 3 meses", "Este Año", "Histórico Completo"],
+            ["Últimos 7 días", "Últimos 30 días", "Últimos 3 meses", "Este Año", "Histórico Completo"],
             horizontal=True, key="filtro_salud"
         )
 
         fecha_maxima_salud = df_salud.index.max()
-        if opcion_periodo_salud == "Últimos 30 días":
+        if opcion_periodo_salud == "Últimos 7 días":
+            fecha_filtro_salud = fecha_maxima_salud - pd.Timedelta(days=7)
+        elif opcion_periodo_salud == "Últimos 30 días":
             fecha_filtro_salud = fecha_maxima_salud - pd.Timedelta(days=30)
         elif opcion_periodo_salud == "Últimos 3 meses":
             fecha_filtro_salud = fecha_maxima_salud - pd.Timedelta(days=90)
@@ -668,10 +671,12 @@ if datos_entrenos:
         # --- FILTRO DE PERIODO ---
         st.markdown("### 📅 Filtro de Entrenamientos")
         opcion_periodo = st.radio("Selecciona el periodo a analizar:",
-                                  ["Últimos 30 días", "Últimos 3 meses", "Este Año", "Histórico Completo"],
+                                  ["Últimos 7 días", "Últimos 30 días", "Últimos 3 meses", "Este Año", "Histórico Completo"],
                                   horizontal=True)
 
-        if opcion_periodo == "Últimos 30 días":
+        if opcion_periodo == "Últimos 7 días":
+            fecha_filtro = fecha_maxima - pd.Timedelta(days=7)
+        elif opcion_periodo == "Últimos 30 días":
             fecha_filtro = fecha_maxima - pd.Timedelta(days=30)
         elif opcion_periodo == "Últimos 3 meses":
             fecha_filtro = fecha_maxima - pd.Timedelta(days=90)
@@ -702,6 +707,31 @@ if datos_entrenos:
         st.divider()
 
         # --- DISTRIBUCIÓN POR DEPORTE + VOLUMEN SEMANAL ---
+        _NOMBRES_DISPLAY = {
+            'exterior ejecutar':             'Carrera exterior',
+            'ejecutar':                      'Running',
+            'running':                       'Running',
+            'correr':                        'Carrera',
+            'caminata':                      'Caminata',
+            'senderismo':                    'Senderismo',
+            'ciclismo en exterior':          'Ciclismo exterior',
+            'ciclismo en interior':          'Ciclismo indoor',
+            'bicicleta estática':            'Bici estática',
+            'entrenamiento cruzado':         'Cross Training',
+            'entrenamiento de fuerza':       'Entren. de fuerza',
+            'functional strength training':  'Fuerza funcional',
+            'fuerza funcional':              'Fuerza funcional',
+            'fuerza':                        'Fuerza',
+            'hiit':                          'HIIT',
+            'yoga':                          'Yoga',
+            'pilates':                       'Pilates',
+            'natación':                      'Natación',
+            'swimming':                      'Natación',
+            'pádel':                         'Pádel',
+            'tenis':                         'Tenis',
+            'remo':                          'Remo',
+            'elíptica':                      'Elíptica',
+        }
         _ICONOS = {'running': '🏃', 'cycling': '🚴', 'swimming': '🏊',
                    'hiking': '🥾', 'strength_training': '💪', 'yoga': '🧘',
                    'trail_running': '🏔️', 'walking': '🚶'}
@@ -771,6 +801,16 @@ if datos_entrenos:
             }
 
         # ── Helpers ─────────────────────────────────────────────────────
+        def _haversine_km(lat1, lon1, lat2, lon2):
+            """Distancia en km entre dos puntos GPS (fórmula haversine)."""
+            R = 6371.0
+            dlat = math.radians(lat2 - lat1)
+            dlon = math.radians(lon2 - lon1)
+            a = (math.sin(dlat / 2) ** 2
+                 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+                 * math.sin(dlon / 2) ** 2)
+            return R * 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
         def _ncdf(x, mu, sigma):
             return 0.5 * (1 + math.erf((x - mu) / (sigma * math.sqrt(2))))
 
@@ -851,7 +891,7 @@ if datos_entrenos:
         for _idx, w in enumerate(workouts_pagina):
             _gidx = _offset + _idx   # índice global → keys únicas entre páginas
             deporte_raw   = w['deporte']
-            deporte_label = w['nombre_original']
+            deporte_label = _NOMBRES_DISPLAY.get(w['nombre_original'].lower().strip(), w['nombre_original'])
             icono         = _ICONOS.get(deporte_raw, '🏆')
             color         = _COLORES_DEPORTE.get(deporte_raw, '#888888')
             distancia     = w['distancia_km']
@@ -1026,6 +1066,138 @@ if datos_entrenos:
                     elif hrr_drop >= 12: nivel_rec = "🟠 Moderada"
                     else:                nivel_rec = "🔴 Baja"
                     st.caption(f"Bajada de {hrr_drop:.0f} lpm en {minutos_rec:.1f} min → {nivel_rec}")
+
+                # ── Análisis específico de carrera ─────────────────────
+                if deporte_raw in ('running', 'trail_running'):
+                    _step_data    = w.get('stepCount', [])
+                    _route_data   = w.get('route', [])
+                    _splits_data  = w.get('splits', [])
+                    _df_hr_run    = _parse_hr_series(hr_data) if hr_data else pd.DataFrame()
+
+                    st.markdown("---")
+                    st.markdown("##### 🏃 Análisis de carrera")
+
+                    # ── FC + Cadencia dual-eje ──────────────────────────
+                    if _step_data:
+                        _df_steps = pd.DataFrame(_step_data)
+                        _df_steps['tiempo'] = pd.to_datetime(
+                            _df_steps['date'].str.replace(r'\s[+-]\d{4}$', '', regex=True),
+                            format='%Y-%m-%d %H:%M:%S', utc=False)
+                        _df_steps = _df_steps.sort_values('tiempo')
+                        _df_steps['cad'] = pd.to_numeric(_df_steps['qty'], errors='coerce').fillna(0)
+
+                        if not _df_hr_run.empty and 'Avg' in _df_hr_run.columns:
+                            _fig_run = make_subplots(specs=[[{"secondary_y": True}]])
+                            _fig_run.add_trace(go.Scatter(
+                                x=_df_hr_run['tiempo'], y=_df_hr_run['Avg'],
+                                name='FC (lpm)', mode='lines',
+                                line=dict(color='#EF5350', width=2)),
+                                secondary_y=False)
+                            _fig_run.add_trace(go.Scatter(
+                                x=_df_steps['tiempo'], y=_df_steps['cad'],
+                                name='Cadencia (spm)', mode='lines',
+                                line=dict(color='#AB63FA', width=1.5)),
+                                secondary_y=True)
+                            _fig_run.update_yaxes(title_text="FC (lpm)", secondary_y=False)
+                            _fig_run.update_yaxes(title_text="Cadencia (spm)", secondary_y=True)
+                            _fig_run.update_layout(
+                                title="❤️ FC + Cadencia",
+                                height=270, margin=dict(l=0, r=0, t=40, b=0),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02))
+                            st.plotly_chart(_fig_run, width='stretch', key=f"run_cad_{_gidx}")
+                        else:
+                            _fig_cad = px.line(_df_steps, x='tiempo', y='cad',
+                                               title="🦵 Cadencia (pasos/min)",
+                                               color_discrete_sequence=['#AB63FA'])
+                            _fig_cad.update_layout(height=200, margin=dict(l=0, r=0, t=40, b=0),
+                                                   yaxis_title="spm", xaxis_title="Hora")
+                            st.plotly_chart(_fig_cad, width='stretch', key=f"cadencia_{_gidx}")
+
+                        _cad_med = _df_steps['cad'].replace(0, pd.NA).dropna().mean()
+                        _cad_max = _df_steps['cad'].max()
+                        if _cad_med and _cad_med > 0:
+                            _cc1, _cc2 = st.columns(2)
+                            _cc1.metric("🦵 Cadencia media", f"{_cad_med:.0f} spm")
+                            _cc2.metric("🦵 Cadencia máx",   f"{_cad_max:.0f} spm")
+
+                    # ── Mapa GPS + perfil de elevación ─────────────────
+                    if _route_data and len(_route_data) > 5:
+                        _df_route = pd.DataFrame(_route_data)
+                        if 'lat' in _df_route.columns and 'lon' in _df_route.columns:
+                            _lats = _df_route['lat'].tolist()
+                            _lons = _df_route['lon'].tolist()
+                            _cum  = [0.0]
+                            for _ri in range(1, len(_lats)):
+                                _cum.append(_cum[-1] + _haversine_km(
+                                    _lats[_ri - 1], _lons[_ri - 1], _lats[_ri], _lons[_ri]))
+                            _df_route['dist_cum'] = _cum
+
+                            _col_map, _col_elev = st.columns([1.3, 1])
+                            with _col_map:
+                                st.markdown("##### 🗺️ Recorrido GPS")
+                                _fig_map = px.line_mapbox(
+                                    _df_route, lat='lat', lon='lon',
+                                    mapbox_style='open-street-map', zoom=13,
+                                    color_discrete_sequence=['#FF6B35'], height=300)
+                                _fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+                                _fig_map.add_trace(go.Scattermapbox(
+                                    lat=[_df_route.iloc[0]['lat'], _df_route.iloc[-1]['lat']],
+                                    lon=[_df_route.iloc[0]['lon'], _df_route.iloc[-1]['lon']],
+                                    mode='markers',
+                                    marker=dict(size=14, color=['#00CC96', '#EF553B']),
+                                    text=['Inicio', 'Fin'], name='', showlegend=False))
+                                st.plotly_chart(_fig_map, width='stretch', key=f"map_{_gidx}")
+
+                            with _col_elev:
+                                if 'altitude' in _df_route.columns:
+                                    st.markdown("##### ⛰️ Perfil de elevación")
+                                    _fig_elev = go.Figure()
+                                    _fig_elev.add_trace(go.Scatter(
+                                        x=_df_route['dist_cum'].round(2),
+                                        y=_df_route['altitude'].round(0),
+                                        fill='tozeroy',
+                                        fillcolor='rgba(99,110,250,0.2)',
+                                        line=dict(color='#636EFA', width=1.5),
+                                        name='Altitud (m)'))
+                                    _fig_elev.update_layout(
+                                        xaxis_title="km", yaxis_title="m",
+                                        height=300, margin=dict(l=0, r=0, t=30, b=0),
+                                        showlegend=False)
+                                    st.plotly_chart(_fig_elev, width='stretch',
+                                                    key=f"elev_{_gidx}")
+
+                    # ── Tabla de parciales ──────────────────────────────
+                    if _splits_data:
+                        st.markdown("##### 📋 Parciales por km")
+                        _df_sp = pd.DataFrame(_splits_data)
+                        _sp_rename = {}
+                        for _src, _dst in [
+                            ('splitDistance', 'Dist.'), ('distanceKm', 'Dist.'), ('distance', 'Dist.'),
+                            ('duration', 'Tiempo'),     ('durationSeconds', 'Tiempo'),
+                            ('pace', 'Ritmo'),          ('avgPace', 'Ritmo'),
+                            ('avgHeartRate', 'FC'),     ('heartRate', 'FC'), ('heart_rate', 'FC'),
+                            ('elevation', 'Desn. m'),   ('elevationGain', 'Desn. m'),
+                            ('elevationChange', 'Desn. m'),
+                        ]:
+                            if _src in _df_sp.columns and _src not in _sp_rename:
+                                _sp_rename[_src] = _dst
+                        _df_sp = _df_sp.rename(columns=_sp_rename)
+                        _df_sp.insert(0, '#', range(1, len(_df_sp) + 1))
+
+                        def _fmt_s(s):
+                            try:
+                                s = float(s)
+                                return f"{int(s // 60)}:{int(s % 60):02d}"
+                            except Exception:
+                                return str(s)
+
+                        if 'Tiempo' in _df_sp.columns:
+                            _df_sp['Tiempo'] = _df_sp['Tiempo'].apply(_fmt_s)
+                        _keep_sp = [c for c in ['#', 'Dist.', 'Tiempo', 'Ritmo', 'FC', 'Desn. m']
+                                    if c in _df_sp.columns]
+                        if _keep_sp:
+                            st.dataframe(_df_sp[_keep_sp], hide_index=True,
+                                         use_container_width=True)
 
         # ── Barra de navegación inferior ─────────────────────────────
         if _total_pag > 1:

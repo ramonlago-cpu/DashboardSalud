@@ -212,6 +212,8 @@ def cargar_actividades(dir_actividades: str,
                     'carga_entreno':     trimp,
                     'ritmo':             ritmo_str,
                     # Series temporales — usadas por las tarjetas expandidas
+                    'route':             w.get('route', []),
+                    'splits':            w.get('splits', []),
                     'heartRateData':     w.get('heartRateData', []),
                     'activeEnergy':      w.get('activeEnergy', []),
                     'heartRateRecovery': w.get('heartRateRecovery', []),
